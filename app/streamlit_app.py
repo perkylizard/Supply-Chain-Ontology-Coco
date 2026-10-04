@@ -8,8 +8,9 @@
 #   * both run on the restricted caller's rights connection, so row access and masking of the
 #     viewer's (default) role apply, exactly as in Snowflake Intelligence.
 #   * owner's rights (SC_ADMIN) are used only for the approved exceptions recorded in AGENTS.md:
-#     the LEGACY "before" numbers on "The Problem", and OPS (suite results, agent audit log,
-#     contract-terms recon) plus metric tags on "Trust" / "Ontology & contracts".
+#     the LEGACY "before" numbers on "The Problem", and OPS (suite results, Step 8 harness results,
+#     agent audit log, contract-terms recon), data metric function results and metric tags on
+#     "Trust" / "Ontology & contracts".
 # This file must not reference the layers below SEMANTIC (enforced by tests/consistency_tests.sql, section E).
 import json
 import os
@@ -468,14 +469,14 @@ Q_LIVE_DOI = (f"SELECT doi_snapshot_date AS D, days_of_inventory AS V FROM SEMAN
 Q_LIVE_HIDDEN = (f"SELECT COUNT(*) AS N FROM SEMANTIC_VIEW({SV} DIMENSIONS plants.plant_code METRICS order_lines.customer_otd_pct "
                  "WHERE plants.plant_code = 'US01' AND dates.fiscal_month_offset = -1)")
 Q_PERSONA = """
-WITH last_run AS (SELECT RUN_ID FROM SC.OPS.TEST_PERSONA_RESULTS ORDER BY RUN_TS DESC LIMIT 1)
+WITH last_run AS (SELECT RUN_ID FROM SC.OPS.TEST_PERSONA_RESULTS WHERE RUN_ID NOT LIKE 'STEP8-%' ORDER BY RUN_TS DESC LIMIT 1)
 SELECT r.RUN_ID, r.RUN_TS, r.ROLE_NAME, r.SURFACE, r.CHECK_NAME, r.DISPLAY_VALUE, r.VISIBLE_PLANTS, r.IS_EQUAL_TO_ADMIN
 FROM SC.OPS.TEST_PERSONA_RESULTS r JOIN last_run USING (RUN_ID)
 ORDER BY r.SURFACE, r.CHECK_NAME, r.ROLE_NAME
 """
 Q_PERSONA_TESTS = """
 SELECT TEST_NAME, STATUS FROM SC.OPS.TEST_RESULTS
-WHERE RUN_ID = (SELECT RUN_ID FROM SC.OPS.TEST_PERSONA_RESULTS ORDER BY RUN_TS DESC LIMIT 1)
+WHERE RUN_ID = (SELECT RUN_ID FROM SC.OPS.TEST_PERSONA_RESULTS WHERE RUN_ID NOT LIKE 'STEP8-%' ORDER BY RUN_TS DESC LIMIT 1)
   AND TEST_NAME IN ('H1_GOV_PERSONA_ROWS_THROUGH_SEMANTIC_VIEW', 'E_AGENT_Q1_OTD_PUNE_SAME_FOR_ALL_PERSONAS',
                     'H1_GOV_HIDDEN_PLANT_THROUGH_AGENT', 'H2_GOV_PENALTY_CLAUSE_MASKED_THROUGH_SEMANTIC_VIEW')
 ORDER BY TEST_NAME
@@ -676,9 +677,35 @@ def page_ontology():
 Q_RUNS = """
 SELECT RUN_ID, MIN(RUN_TS) AS RUN_TS, COUNT_IF(STATUS = 'PASS') AS PASSED, COUNT_IF(STATUS = 'FAIL') AS FAILED,
        COUNT_IF(STATUS = 'SKIP') AS SKIPPED, COUNT(*) AS TESTS
-FROM SC.OPS.TEST_RESULTS GROUP BY RUN_ID ORDER BY RUN_TS DESC LIMIT 15
+FROM SC.OPS.TEST_RESULTS WHERE RUN_ID NOT LIKE 'STEP8-%' GROUP BY RUN_ID ORDER BY RUN_TS DESC LIMIT 15
 """
 Q_RUN_TESTS = "SELECT TEST_NAME, STATUS, DETAIL FROM SC.OPS.TEST_RESULTS WHERE RUN_ID = ? ORDER BY STATUS <> 'FAIL', TEST_NAME"
+# Step 8 runner (tests/step8_harness.py): RUN_ID STEP8-<PERSONA|EDGE>-<label>-<utc>; scores are parsed from the
+# scorecard rows it writes (test scores, not supply chain metrics)
+Q_STEP8_RUNS = """
+SELECT RUN_ID, MIN(RUN_TS) AS RUN_TS, SPLIT_PART(RUN_ID, '-', 2) AS PART, LOWER(SPLIT_PART(RUN_ID, '-', 3)) AS LABEL,
+       COUNT_IF(STATUS = 'PASS' AND TEST_NAME NOT LIKE '%SCORE%') AS PASSED, COUNT_IF(STATUS = 'FAIL' AND TEST_NAME NOT LIKE '%SCORE%') AS FAILED,
+       MAX(IFF(TEST_NAME = 'P_SCORE_PERSONA_CONSISTENCY', REGEXP_SUBSTR(DETAIL, '= ([0-9.]+)%', 1, 1, 'e'), NULL))::FLOAT AS CONSISTENCY_PCT,
+       MAX(IFF(TEST_NAME = 'P_SCORE_GOLDEN_MATCH', REGEXP_SUBSTR(DETAIL, '= ([0-9.]+)%', 1, 1, 'e'), NULL))::FLOAT AS GOLDEN_PCT
+FROM SC.OPS.TEST_RESULTS WHERE RUN_ID LIKE 'STEP8-%' AND RUN_ID NOT LIKE 'STEP8-%-SMOKE-%'
+GROUP BY RUN_ID ORDER BY RUN_TS DESC LIMIT 20
+"""
+Q_STEP8_ROWS = "SELECT TEST_NAME, STATUS, DETAIL FROM SC.OPS.TEST_RESULTS WHERE RUN_ID = ? AND NOT CONTAINS(TEST_NAME, 'SCORE') ORDER BY TEST_NAME"
+Q_STEP8_PERSONA = """
+SELECT CHECK_NAME, ROLE_NAME, SURFACE, DISPLAY_VALUE, IS_EQUAL_TO_ADMIN AS MATCHES_GOLDEN
+FROM SC.OPS.TEST_PERSONA_RESULTS WHERE RUN_ID = ? ORDER BY CHECK_NAME, SURFACE DESC, ROLE_NAME
+"""
+# data metric functions of sql/60_ops_dq_dmf.sql: latest scheduled measurement per association + its expectation
+Q_DMF = """
+SELECT r.TABLE_NAME, r.METRIC_NAME, ARRAY_TO_STRING(r.ARGUMENT_NAMES, ', ') AS ARGUMENTS, r.VALUE::VARCHAR AS VALUE,
+       e.EXPECTATION_NAME, e.EXPECTATION_EXPRESSION, e.EXPECTATION_VIOLATED, r.MEASUREMENT_TIME
+FROM SNOWFLAKE.LOCAL.DATA_QUALITY_MONITORING_RESULTS r
+LEFT JOIN SNOWFLAKE.LOCAL.DATA_QUALITY_MONITORING_EXPECTATION_STATUS e
+  ON e.REFERENCE_ID = r.REFERENCE_ID AND e.MEASUREMENT_TIME = r.MEASUREMENT_TIME
+WHERE r.TABLE_DATABASE = 'SC'
+QUALIFY RANK() OVER (PARTITION BY r.TABLE_NAME, r.METRIC_NAME, ARRAY_TO_STRING(r.ARGUMENT_NAMES, ',') ORDER BY r.MEASUREMENT_TIME DESC) = 1
+ORDER BY r.TABLE_NAME, r.METRIC_NAME, ARGUMENTS
+"""
 Q_AUDIT = """
 SELECT REQUESTED_TS, CONFIRMATION_ID, ACTION_TYPE, STATUS, SUPPLIER_NO, SUPPLIER_NAME, PO_NO, PO_LINE_NO, PLANT_CODE,
        REQUESTED_BY_USER, REASON, EVIDENCE, SOURCE
@@ -695,6 +722,78 @@ Q_RECON_MISMATCH = """
 SELECT CONTRACT_NO, SUPPLIER_NO, TERM, PDF_VALUE, SUPPLIER_SYSTEM_FIELD
 FROM SC.OPS.DQ_CONTRACT_TERMS_RECON WHERE STATUS = 'MISMATCH' ORDER BY CONTRACT_NO, TERM
 """
+
+
+def trust_step8(v):
+    """Playbook Step 8 results as recorded by tests/step8_harness.py (separate runner, not run on every change)."""
+    st.subheader("Persona consistency harness and guardrails (Step 8)")
+    runs, err = safe(q_owner, Q_STEP8_RUNS)
+    if err or runs is None or runs.empty:
+        st.caption("No Step 8 runs recorded yet: run `python3 tests/step8_harness.py --part persona` / `--part edge`.")
+        return
+    persona = runs[runs["PART"] == "PERSONA"]
+    edge = runs[runs["PART"] == "EDGE"]
+    if not persona.empty:
+        st.markdown("**8.1 Same question, three vocabularies, three personas.** 30 base questions (every canonical metric "
+                    "and the named variants; last month, this quarter, a calendar month, no period; plants, regions, "
+                    "suppliers, categories), each phrased in planning, procurement and logistics words. Cortex Analyst "
+                    "writes the SQL on the semantic view; it runs as the persona role whose words were used; the value is "
+                    "compared with the golden `SEMANTIC_VIEW()` query (tolerance 0.05 points).")
+        latest = {lab: persona[persona["LABEL"] == lab].iloc[0] for lab in ("before", "after") if (persona["LABEL"] == lab).any()}
+        cols = st.columns(4)
+        for i, (lab, r) in enumerate(latest.items()):
+            cols[2 * i].metric(f"Persona consistency ({lab})", f"{r['CONSISTENCY_PCT']:.1f}%", border=True,
+                               help="Base questions whose three phrasings returned the same value. Target 100%.")
+            cols[2 * i + 1].metric(f"Golden match ({lab})", f"{r['GOLDEN_PCT']:.1f}%", border=True,
+                                   help="Phrasings whose value equals the golden SEMANTIC_VIEW() value. Target 95%.")
+        last = persona.iloc[0]
+        rows, _ = safe(q_owner, Q_STEP8_ROWS, [str(last["RUN_ID"])])
+        vals, _ = safe(q_owner, Q_STEP8_PERSONA, [str(last["RUN_ID"])])
+        with st.expander(f"Per question, run `{last['RUN_ID']}` ({str(last['RUN_TS'])[:16]} UTC): "
+                         f"{num(last['PASSED'])} pass, {num(last['FAILED'])} fail"):
+            if vals is not None and not vals.empty and not v["restricted"]:
+                vals["COL"] = vals.apply(lambda x: "Golden (SEMANTIC_VIEW)" if x["SURFACE"] != "CORTEX_ANALYST" else x["ROLE_NAME"], axis=1)
+                grid = vals.pivot_table(index="CHECK_NAME", columns="COL", values="DISPLAY_VALUE", aggfunc="first")
+                grid = grid[[c for c in ["Golden (SEMANTIC_VIEW)", "SC_PLANNER", "SC_PROCUREMENT", "SC_LOGISTICS"] if c in grid.columns]]
+                if rows is not None:
+                    grid = grid.join(rows.assign(CHECK_NAME=rows["TEST_NAME"].str[2:]).set_index("CHECK_NAME")[["STATUS"]])
+                st.dataframe(grid, width="stretch")
+            elif rows is not None:
+                st.dataframe(rows.drop(columns=["DETAIL"]), hide_index=True, width="stretch")
+    if not edge.empty:
+        last = edge.iloc[0]
+        st.markdown(f"**8.2 Edge cases and guardrails through the agent:** {num(last['PASSED'])} of "
+                    f"{num(last['PASSED'] + last['FAILED'])} passed in run `{last['RUN_ID']}` ({str(last['RUN_TS'])[:16]} UTC). "
+                    "Zero due lines, future period, unknown supplier, misspelled plant, OTD vs requested date, ambiguous "
+                    "question, out of scope, prompt injection, hidden plant, closed PO, expedite at a hidden plant.")
+        rows, _ = safe(q_owner, Q_STEP8_ROWS, [str(last["RUN_ID"])])
+        if rows is not None:
+            if v["restricted"]:
+                rows = rows.drop(columns=["DETAIL"])
+            st.dataframe(rows, hide_index=True, width="stretch",
+                         column_config={"DETAIL": st.column_config.TextColumn(width="large")})
+
+
+def trust_dmf():
+    st.subheader("Data quality monitors (data metric functions)")
+    dq, err = safe(q_owner, Q_DMF)
+    if err:
+        st.error(err)
+        return
+    if dq is None or dq.empty:
+        st.caption("No scheduled data metric function result yet (daily at 12:00 UTC, sql/60_ops_dq_dmf.sql).")
+        return
+    ok = int((dq["EXPECTATION_VIOLATED"] == False).sum())  # noqa: E712 (pandas boolean column)
+    bad = int((dq["EXPECTATION_VIOLATED"] == True).sum())  # noqa: E712
+    a, b, c = st.columns(3)
+    a.metric("Expectations met", num(ok), border=True)
+    b.metric("Expectations violated", num(bad), border=True)
+    c.metric("Last measured (UTC)", str(dq["MEASUREMENT_TIME"].max())[:16], border=True)
+    st.dataframe(dq, hide_index=True, width="stretch")
+    st.caption("NULL_COUNT, DUPLICATE_COUNT and FRESHNESS (seconds since the latest arrival) on the order-line and "
+               "shipment facts, plus a custom check for supplier parts that map to no ERP part (planted ~2%, allowed up "
+               "to 3%). Scheduled daily at 12:00 UTC as the table owner (sees every plant); expectations mirror the bands "
+               "of the consistency suite.")
 
 
 def page_trust():
@@ -729,6 +828,9 @@ def page_trust():
             with st.expander(f"All {len(tests)} tests of the last run"):
                 st.dataframe(tests, hide_index=True, width="stretch",
                              column_config={"DETAIL": st.column_config.TextColumn(width="large")})
+
+    trust_step8(v)
+    trust_dmf()
 
     st.subheader("Agent action audit log")
     audit, aerr = safe(q_owner, Q_AUDIT)

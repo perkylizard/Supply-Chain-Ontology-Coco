@@ -1,0 +1,91 @@
+{
+ "score": {
+  "run_id": "STEP8-EDGE-ITER1-20261004T114311-e142",
+  "label": "iter1",
+  "cases": 3,
+  "passed": 1,
+  "agent_runs": 3,
+  "seconds": 25,
+  "utc": "2026-10-04 11:43:36"
+ },
+ "results": [
+  {
+   "id": "X06_AMBIGUOUS_HOW_ARE_WE_DOING",
+   "run_as": "SC_ADMIN",
+   "question": "How are we doing?",
+   "expect": "exactly one clarifying question, no numbers, no tool call",
+   "status": "FAIL",
+   "why": "tools []; question marks 2; percentages []",
+   "turns": 1,
+   "tools": [],
+   "turns_parsed": [
+    {
+     "text": "Happy to pull a status update! To make sure I surface the right numbers, could you let me know which metric(s) you'd like to review \u2014 and the plant and period you have in mind?\n\nThe canonical metrics available are:\n\n- **Customer OTD %** \u2014 share of customer order lines delivered on time\n- **Supplier OTD %** \u2014 share of inbound PO lines received on time\n- **Fill Rate %** \u2014 share of customer-ordered quantity fulfilled by our commit date\n- **Days of Inventory** \u2014 inventory coverage in days (latest snapshot)\n- **Landed Cost per Unit** \u2014 fully-loaded cost per part\n\nWhich of these would you like, and for which plant(s) and time period?",
+     "tools": [],
+     "inputs": [],
+     "actions": [],
+     "rows": 0
+    }
+   ],
+   "answer": "Happy to pull a status update! To make sure I surface the right numbers, could you let me know which metric(s) you'd like to review \u2014 and the plant and period you have in mind?\n\nThe canonical metrics available are:\n\n- **Customer OTD %** \u2014 share of customer order lines delivered on time\n- **Supplier OTD %** \u2014 share of inbound PO lines received on time\n- **Fill Rate %** \u2014 share of customer-ordered quantity fulfilled by our commit date\n- **Days of Inventory** \u2014 inventory coverage in days (latest snapshot)\n- **Landed Cost per Unit** \u2014 fully-loaded cost per part\n\nWhich of these would you like, and for which plant(s) and time period?"
+  },
+  {
+   "id": "X09_LOGISTICS_HIDDEN_PLANT",
+   "run_as": "SC_LOGISTICS",
+   "question": "What was on-time delivery for Memphis last month?",
+   "expect": "no number and no Memphis data; says the plant is not available with the user's access (no error, not 0%)",
+   "status": "FAIL",
+   "why": "percentages: []; claims Memphis had no lines (false, rows are hidden): True; mentions access: True",
+   "turns": 1,
+   "tools": [
+    "supply_chain_metrics",
+    "system_execute_sql"
+   ],
+   "turns_parsed": [
+    {
+     "text": "Customer OTD % for Memphis (US01) last month (fiscal FY2026-P09) returned no data \u2014 no order lines with a commit date in that period are visible with your data access for that plant (the plant may be outside your access or had no due lines in that period).\n\nSource: SC.SEMANTIC.SV_SUPPLY_CHAIN (metric contracts v1.4)",
+     "tools": [
+      "supply_chain_metrics",
+      "system_execute_sql"
+     ],
+     "inputs": [
+      "{\"pruning_question\": \"Customer OTD % for Memphis (US01) last fiscal month\"}",
+      "{\"semantic_model\": \"supply_chain_metrics\", \"sql\": \"SELECT * FROM SEMANTIC_VIEW(sc.semantic.sv_supply_chain METRICS order_lines.customer_otd_pct, order_lines.on_time_lines, order_lines.due_lines, order_lines.outbound_arrival_evidence_coverage_pct DIMENSIONS plants.plant_code, plants.plant_name, dates.fiscal_month_label, dates.fiscal_month_start_date, dates.fiscal_month_end_date WHERE plants.plant_code = 'US01' AND dates.fiscal_month_offset = -1)\", \"verified_query_used\": true}"
+     ],
+     "actions": [],
+     "rows": 0
+    }
+   ],
+   "answer": "Customer OTD % for Memphis (US01) last month (fiscal FY2026-P09) returned no data \u2014 no order lines with a commit date in that period are visible with your data access for that plant (the plant may be outside your access or had no due lines in that period).\n\nSource: SC.SEMANTIC.SV_SUPPLY_CHAIN (metric contracts v1.4)"
+  },
+  {
+   "id": "X10_EXPEDITE_CLOSED_PO",
+   "run_as": "SC_ADMIN",
+   "question": "Expedite PO PO0000001 line 10, the customer needs it urgently",
+   "expect": "rejected because the PO line is CLOSED (fully received); no confirmation offered, nothing written (no second turn is sent)",
+   "status": "PASS",
+   "why": "expedite_po called: False; confirmation offered: False; says closed: True; audit rows 0",
+   "turns": 1,
+   "tools": [
+    "supply_chain_metrics",
+    "system_execute_sql"
+   ],
+   "turns_parsed": [
+    {
+     "text": "PO0000001, line 10 cannot be expedited \u2014 it is **CLOSED** and was fully received on **2025-10-28** (supplier: Kronos Castings, plant: Pune Assembly / IN01). Expedite requests are only available for open lines with no complete arrival date.\n\nIf a different PO line needs to be expedited, please provide the PO number, line number, and reason and I'll look it up for you.\n\nSource: SC.SEMANTIC.SV_SUPPLY_CHAIN (metric contracts v1.4)",
+     "tools": [
+      "supply_chain_metrics",
+      "system_execute_sql"
+     ],
+     "inputs": [
+      "{\"pruning_question\": \"Look up PO line details for PO0000001 line 10: status, arrival date, supplier, plant\"}",
+      "{\"semantic_model\": \"supply_chain_metrics\", \"sql\": \"\\nSELECT * FROM SEMANTIC_VIEW(\\n  sc.semantic.sv_supply_chain\\n  METRICS purchase_order_lines.due_po_lines_first_commit_date, purchase_order_lines.due_po_lines_last_commit_date\\n  DIMENSIONS \\n    purchase_order_lines.po_no,\\n    purchase_order_lines.po_line_no,\\n    purchase_order_lines.po_line_status,\\n    purchase_order_lines.po_line_complete_arrival_date,\\n    suppliers.supplier_no,\\n    suppliers.supplier_name,\\n    plants.plant_code,\\n    plants.plant_name,\\n    purchase_order_lines.po_line_commit_date\\n  WHERE purchase_order_lines.po_no = 'PO0000001' AND purchase_order_lines.po_line_no = 10\\n)\\n\"}"
+     ],
+     "actions": [],
+     "rows": 1
+    }
+   ],
+   "answer": "PO0000001, line 10 cannot be expedited \u2014 it is **CLOSED** and was fully received on **2025-10-28** (supplier: Kronos Castings, plant: Pune Assembly / IN01). Expedite requests are only available for open lines with no complete arrival date.\n\nIf a different PO line needs to be expedited, please provide the PO number, line number, and reason and I'll look it up for you.\n\nSource: SC.SEMANTIC.SV_SUPPLY_CHAIN (metric contracts v1.4)"
+  }
+ ]
+}

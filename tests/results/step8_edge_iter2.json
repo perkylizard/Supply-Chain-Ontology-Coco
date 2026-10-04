@@ -1,0 +1,62 @@
+{
+ "score": {
+  "run_id": "STEP8-EDGE-ITER2-20261004T114415-39cd",
+  "label": "iter2",
+  "cases": 2,
+  "passed": 2,
+  "agent_runs": 2,
+  "seconds": 31,
+  "utc": "2026-10-04 11:44:46"
+ },
+ "results": [
+  {
+   "id": "X06_AMBIGUOUS_HOW_ARE_WE_DOING",
+   "run_as": "SC_ADMIN",
+   "question": "How are we doing?",
+   "expect": "exactly one clarifying question, no numbers, no tool call",
+   "status": "PASS",
+   "why": "tools []; question marks 1; percentages []",
+   "turns": 1,
+   "tools": [],
+   "turns_parsed": [
+    {
+     "text": "Which metric would you like to check \u2014 Customer OTD %, Supplier OTD %, Fill Rate %, Days of Inventory, or Landed Cost per Unit \u2014 and for which plant and period?",
+     "tools": [],
+     "inputs": [],
+     "actions": [],
+     "rows": 0
+    }
+   ],
+   "answer": "Which metric would you like to check \u2014 Customer OTD %, Supplier OTD %, Fill Rate %, Days of Inventory, or Landed Cost per Unit \u2014 and for which plant and period?"
+  },
+  {
+   "id": "X09_LOGISTICS_HIDDEN_PLANT",
+   "run_as": "SC_LOGISTICS",
+   "question": "What was on-time delivery for Memphis last month?",
+   "expect": "no number and no Memphis data; says the plant is not available with the user's access (no error, not 0%)",
+   "status": "PASS",
+   "why": "percentages: []; claims Memphis had no lines (false, rows are hidden): False; mentions access: True",
+   "turns": 1,
+   "tools": [
+    "supply_chain_metrics",
+    "system_execute_sql"
+   ],
+   "turns_parsed": [
+    {
+     "text": "Customer OTD % for Memphis (US01) last fiscal month is **n/a** \u2014 the query returned no rows, so no order lines with commit dates in that period are visible with your current data access (Memphis may be outside your plant access scope or have no qualifying activity in the period).\n\nIf you believe you should have access to Memphis data, please check with your system administrator. Alternatively, I can pull Customer OTD % for a different plant or a broader scope \u2014 just let me know.\n\nSource: SC.SEMANTIC.SV_SUPPLY_CHAIN (metric contracts v1.4)",
+     "tools": [
+      "supply_chain_metrics",
+      "system_execute_sql"
+     ],
+     "inputs": [
+      "{\"pruning_question\": \"Customer OTD % for Memphis (US01) last fiscal month\"}",
+      "{\"semantic_model\": \"supply_chain_metrics\", \"sql\": \"SELECT * FROM SEMANTIC_VIEW(sc.semantic.sv_supply_chain\\n  METRICS order_lines.customer_otd_pct, order_lines.on_time_lines, order_lines.due_lines, order_lines.outbound_arrival_evidence_coverage_pct\\n  DIMENSIONS plants.plant_code, plants.plant_name, dates.fiscal_month_label, dates.fiscal_month_start_date, dates.fiscal_month_end_date\\n  WHERE plants.plant_code = 'US01' AND dates.fiscal_month_offset = -1)\", \"verified_query_used\": true}"
+     ],
+     "actions": [],
+     "rows": 0
+    }
+   ],
+   "answer": "Customer OTD % for Memphis (US01) last fiscal month is **n/a** \u2014 the query returned no rows, so no order lines with commit dates in that period are visible with your current data access (Memphis may be outside your plant access scope or have no qualifying activity in the period).\n\nIf you believe you should have access to Memphis data, please check with your system administrator. Alternatively, I can pull Customer OTD % for a different plant or a broader scope \u2014 just let me know.\n\nSource: SC.SEMANTIC.SV_SUPPLY_CHAIN (metric contracts v1.4)"
+  }
+ ]
+}

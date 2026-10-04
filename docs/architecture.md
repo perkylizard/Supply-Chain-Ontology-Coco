@@ -188,3 +188,5 @@ The consistency tests (see [`../AGENTS.md`](../AGENTS.md)) are what make "one an
 4. **Same answer across surfaces:** benchmark questions asked through the agent return the same value as the equivalent `SEMANTIC_VIEW()` query.
 5. **Pipeline health:** no dynamic table in `FAILED` or `UPSTREAM_FAILED` state.
 6. **Access:** persona roles cannot read `RAW_*`, `CONFORMED`, `LEGACY`, `OPS` or `GOVERNANCE`; plant row access and masking hold through the semantic view and the agent (tests `H*`).
+
+Beyond the per-change suite, the on-demand Step 8 runner `tests/step8_harness.py` (AGENTS.md) checks the same guarantee at scale and the agent's guardrails. It asks 30 base questions, each in planning, procurement and logistics vocabulary, through Cortex Analyst. Each SQL runs as the matching persona role and is compared with a golden `SEMANTIC_VIEW()` query (persona consistency %, golden match %). It also runs 11 edge cases through `AGT_SUPPLY_CHAIN` (`tests/edge_cases.md`). Data metric functions (`sql/60_ops_dq_dmf.sql`, daily) watch nulls, duplicates and freshness on the order-line and shipment facts, plus orphan supplier parts. All results appear on the app page Trust.
