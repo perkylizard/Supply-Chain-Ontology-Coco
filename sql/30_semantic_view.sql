@@ -3,7 +3,12 @@
 -- SC.SEMANTIC.SV_SUPPLY_CHAIN: the ONE place where metric logic lives
 -- (AGENTS.md hard rule 1). Implements docs/metric_contracts.md v1.4 over the
 -- SC.CONFORMED entities of docs/ontology.md.
--- Depends on: sql/20_conformed.sql. Idempotent: CREATE OR REPLACE ... COPY GRANTS.
+-- Depends on: sql/20_conformed.sql, sql/00_setup.sql (tags SC.GOVERNANCE.METRIC_OWNER /
+-- CERTIFIED). Idempotent: CREATE OR REPLACE ... COPY GRANTS.
+-- Certification (sql/50_governance.sql item 3): the view and the canonical metrics carry
+-- CERTIFIED = 'TRUE' and METRIC_OWNER = the contract owner; Supplier Contractual OTD % / Gap
+-- carry CERTIFIED = 'NAMED_VARIANT'. Metric tags exist only in this DDL (ALTER SEMANTIC VIEW
+-- tags the view only), so they are re-applied by every run of this file.
 -- Authored as DDL (single source). cortex_project/SV_SUPPLY_CHAIN.sv.yaml is an
 -- export of the deployed view, re-synced after each deploy; never edit it by hand.
 --
@@ -583,6 +588,7 @@ CREATE OR REPLACE SEMANTIC VIEW SC.SEMANTIC.SV_SUPPLY_CHAIN
       AS (COUNT_IF(order_lines.is_on_time_line) / NULLIF(COUNT_IF(order_lines.is_due_line), 0))::NUMBER(9,6)
       WITH SYNONYMS ('on-time delivery', 'OTD', 'OTD %', 'on-time', 'customer on-time delivery', 'outbound OTD',
                      'on-time to commit', 'delivery reliability', 'line-level OTIF')
+      WITH TAG (SC.GOVERNANCE.METRIC_OWNER = 'SC_PLANNER', SC.GOVERNANCE.CERTIFIED = 'TRUE')
       COMMENT = 'Customer OTD % (contract v1.2 §2): share of due customer order lines that arrived complete within [commit - 1 day, commit] of the first commit date. = ON_TIME_LINES / DUE_LINES, 0-1 fraction, NULL when no due lines. Default meaning of unqualified on-time delivery / OTD. Partial = late, so this is line-level OTIF. Publish with OUTBOUND_ARRIVAL_EVIDENCE_COVERAGE_PCT.',
     order_lines.on_time_lines
       AS COUNT_IF(order_lines.is_on_time_line)
@@ -596,6 +602,7 @@ CREATE OR REPLACE SEMANTIC VIEW SC.SEMANTIC.SV_SUPPLY_CHAIN
       AS (SUM(IFF(order_lines.is_due_line, order_lines.line_filled_qty, NULL))
           / NULLIF(SUM(IFF(order_lines.is_due_line, order_lines.line_required_qty, NULL)), 0))::NUMBER(9,6)
       WITH SYNONYMS ('fill rate', 'unit fill rate', 'customer fill rate', 'demand fill rate', 'quantity fill rate')
+      WITH TAG (SC.GOVERNANCE.METRIC_OWNER = 'SC_PLANNER', SC.GOVERNANCE.CERTIFIED = 'TRUE')
       COMMENT = 'Fill Rate % (contract v1.2 §4): share of required qty that reached the customer by the commit date = FILL_RATE_FILLED_QTY / FILL_RATE_REQUIRED_QTY over due lines (same population as Customer OTD %), 0-1 fraction, NULL when empty. Per line filled = MIN(arrived by commit, required); early arrivals count, substitutes do not. Not trailer utilization.',
     order_lines.fill_rate_filled_qty
       AS SUM(IFF(order_lines.is_due_line, order_lines.line_filled_qty, NULL))
@@ -627,6 +634,7 @@ CREATE OR REPLACE SEMANTIC VIEW SC.SEMANTIC.SV_SUPPLY_CHAIN
       AS (COUNT_IF(purchase_order_lines.is_on_time_po_line) / NULLIF(COUNT_IF(purchase_order_lines.is_due_po_line), 0))::NUMBER(9,6)
       WITH SYNONYMS ('supplier OTD', 'vendor OTD', 'vendor on-time delivery', 'inbound OTD', 'supplier on-time',
                      'supplier delivery performance', 'supplier line-level OTIF')
+      WITH TAG (SC.GOVERNANCE.METRIC_OWNER = 'SC_PROCUREMENT', SC.GOVERNANCE.CERTIFIED = 'TRUE')
       COMMENT = 'Supplier OTD % (contract v1.2 §3): share of due PO lines that arrived complete at the receiving plant within [commit - 1 day, commit] of the first supplier confirmation. = ON_TIME_PO_LINES / DUE_PO_LINES, 0-1 fraction, NULL when empty. Arrival per ASN = IoT geofence entry, then carrier POD, else GR posting date (GR_FALLBACK, lower confidence: GR lags arrival by 0-5 days and can understate OTD). Only for explicit supplier / vendor / inbound questions. Publish with SUPPLIER_OTD_EVIDENCE_COVERAGE_PCT and SUPPLIER_OTD_GR_FALLBACK_PCT.',
     purchase_order_lines.on_time_po_lines
       USING (po_line_to_commit_date)
@@ -666,6 +674,7 @@ CREATE OR REPLACE SEMANTIC VIEW SC.SEMANTIC.SV_SUPPLY_CHAIN
       USING (po_line_to_latest_confirmed_date)
       AS (COUNT_IF(purchase_order_lines.is_contractual_on_time_po_line) / NULLIF(COUNT_IF(purchase_order_lines.is_contractual_due_po_line), 0))::NUMBER(9,6)
       WITH SYNONYMS ('contractual OTD', 'OTD vs contract', 'supplier contractual OTD', 'contractual on-time delivery', 'on-time vs contract')
+      WITH TAG (SC.GOVERNANCE.METRIC_OWNER = 'SC_PROCUREMENT', SC.GOVERNANCE.CERTIFIED = 'NAMED_VARIANT')
       COMMENT = 'Supplier Contractual OTD % (contract v1.4 §3.1, a named variant, NOT canonical): share of contracted-supplier PO lines whose full qty arrived on or before the latest confirmed date + the contract grace days (early = on time). = CONTRACTUAL_ON_TIME_PO_LINES / CONTRACTUAL_DUE_PO_LINES, 0-1 fraction, NULL when empty. Calendar months on the latest confirmed date. Only for "contractual OTD", "OTD vs contract" or "below contracted target" questions; never for plain OTD or supplier OTD.',
     purchase_order_lines.contractual_on_time_po_lines
       USING (po_line_to_latest_confirmed_date)
@@ -687,6 +696,7 @@ CREATE OR REPLACE SEMANTIC VIEW SC.SEMANTIC.SV_SUPPLY_CHAIN
              COUNT_IF(purchase_order_lines.is_contractual_on_time_po_line) / NULLIF(COUNT_IF(purchase_order_lines.is_contractual_due_po_line), 0)
              - MAX(IFF(purchase_order_lines.is_contractual_due_po_line, purchase_order_lines.CONTRACT_DELIVERY_TARGET_FRACTION, NULL)), NULL)::NUMBER(9,6)
       WITH SYNONYMS ('below contracted target', 'gap to contracted target', 'contractual OTD gap', 'OTD gap vs contract target')
+      WITH TAG (SC.GOVERNANCE.METRIC_OWNER = 'SC_PROCUREMENT', SC.GOVERNANCE.CERTIFIED = 'NAMED_VARIANT')
       COMMENT = 'Supplier Contractual OTD Gap (contract v1.4 §3.1) = SUPPLIER_CONTRACTUAL_OTD_PCT - CONTRACTED_DELIVERY_TARGET, as a 0-1 fraction (x 100 = percentage points). Negative = below the contracted target. Defined within one contract: NULL when the scope spans several contracts, so group by supplier or contract.',
     purchase_order_lines.contractual_pro_forma_po_lines
       USING (po_line_to_latest_confirmed_date)
@@ -717,6 +727,7 @@ CREATE OR REPLACE SEMANTIC VIEW SC.SEMANTIC.SV_SUPPLY_CHAIN
           / NULLIF(SUM(IFF(inventory.is_doi_population, inventory.daily_demand_qty * parts.standard_cost_amt, NULL)), 0))::NUMBER(18,6)
       WITH SYNONYMS ('days of inventory', 'DOI', 'days of supply', 'DOS', 'days of cover', 'days of coverage',
                      'inventory coverage', 'days on hand')
+      WITH TAG (SC.GOVERNANCE.METRIC_OWNER = 'SC_PLANNER', SC.GOVERNANCE.CERTIFIED = 'TRUE')
       COMMENT = 'Days of Inventory (contract v1.2 §5) = usable inventory / average daily demand, at the LAST snapshot date of the period (never averaged or summed over dates). Weighted by standard cost: SUM(usable x std cost) / SUM(daily demand x std cost); within one Part the cost cancels, so this equals SUM(usable) / SUM(daily demand). Daily demand = forecast / days covered, or trailing 28-day shipments / 28 when the forecast covers < 14 days. NULL when demand is 0 (no demand).',
     inventory.weeks_of_supply
       NON ADDITIVE BY (inventory.inventory_snapshot_date)
@@ -768,6 +779,7 @@ CREATE OR REPLACE SEMANTIC VIEW SC.SEMANTIC.SV_SUPPLY_CHAIN
              NULL)::NUMBER(18,4)
       WITH SYNONYMS ('landed cost', 'landed cost per unit', 'actual landed cost', 'unit landed cost',
                      'total landed cost per unit', 'LCU', 'delivered cost per unit')
+      WITH TAG (SC.GOVERNANCE.METRIC_OWNER = 'SC_PROCUREMENT', SC.GOVERNANCE.CERTIFIED = 'TRUE')
       COMMENT = 'Landed Cost per Unit (contract v1.2 §6) = TOTAL_LANDED_COST_AMT / LANDED_COST_RECEIVED_QTY, USD per base UoM, quantity-weighted, by GR posting date. Only defined within ONE Part: returns NULL when the group spans more than one part, so always group by part_no. Above Part level use TOTAL_LANDED_COST_AMT or LANDED_COST_UPLIFT_PCT.',
     goods_receipts.total_landed_cost_amt
       USING (goods_receipt_to_posting_date)
@@ -803,6 +815,7 @@ CREATE OR REPLACE SEMANTIC VIEW SC.SEMANTIC.SV_SUPPLY_CHAIN
           / NULLIF(SUM(IFF(goods_receipts.is_landed_cost_population, goods_receipts.receipt_product_cost_amt, NULL)), 0) - 1)::NUMBER(9,6)
       WITH SYNONYMS ('landed cost uplift', 'landed-cost uplift %', 'landed cost uplift percent', 'uplift over invoiced price',
                      'landed cost markup')
+      WITH TAG (SC.GOVERNANCE.METRIC_OWNER = 'SC_PROCUREMENT', SC.GOVERNANCE.CERTIFIED = 'TRUE')
       COMMENT = 'Landed Cost Uplift % (contract v1.2 §6.1) = TOTAL_LANDED_COST_AMT / INVOICED_PRODUCT_COST_AMT - 1: how much freight, accessorials, duties and insurance add on top of the invoiced price. 0-1 fraction, ratio of sums, valid at any level incl. across parts; same population as Landed Cost per Unit. NULL when invoiced cost is 0. PROVISIONAL receipts understate it (missing freight / duty count as 0).',
     goods_receipts.landed_cost_evidence_coverage_pct
       USING (goods_receipt_to_posting_date)
@@ -968,6 +981,7 @@ Other variants are also not canonical and must be named as such: Ship-On-Time, S
     )
   )
 
+  WITH TAG (SC.GOVERNANCE.METRIC_OWNER = 'SC_ADMIN', SC.GOVERNANCE.CERTIFIED = 'TRUE')
   COPY GRANTS;
 
 DESCRIBE SEMANTIC VIEW SC.SEMANTIC.SV_SUPPLY_CHAIN;

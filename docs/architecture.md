@@ -159,10 +159,20 @@ Agent instructions must apply the default rule from the contracts: unqualified "
 
 ## 5. Security
 
-| Role | RAW_* | CONFORMED | LEGACY | OPS | SEMANTIC | AGENTS |
-|---|---|---|---|---|---|---|
-| `SC_ADMIN` | owner | owner | owner | owner | owner | owner |
-| `SC_PLANNER`, `SC_PROCUREMENT`, `SC_LOGISTICS` | — | — | — | — | SELECT | SELECT |
+| Role | RAW_* | CONFORMED | LEGACY | OPS | GOVERNANCE | SEMANTIC | AGENTS |
+|---|---|---|---|---|---|---|---|
+| `SC_ADMIN` | owner | owner | owner | owner | owner | owner | owner |
+| `SC_PLANNER`, `SC_PROCUREMENT`, `SC_LOGISTICS` | — | — | — | — | — | SELECT | SELECT |
+
+**Row and column security** (`sql/50_governance.sql`, schema `GOVERNANCE`, policies evaluated with `IS_ROLE_IN_SESSION` so they apply through `SV_SUPPLY_CHAIN`, Cortex Analyst and the agent):
+
+| Control | Objects | SC_ADMIN, SC_PLANNER, SC_PROCUREMENT | SC_LOGISTICS |
+|---|---|---|---|
+| `RAP_PLANT_ACCESS` (mapping `GOV_ROLE_PLANT_ACCESS`) | `DIM_PLANT`, `FACT_ORDER_LINE`, `FACT_SHIPMENT`, `FACT_PO_LINE`, `FACT_GOODS_RECEIPT`, `FACT_INVENTORY_SNAPSHOT` | all 8 plants | APAC + EMEA: IN01, CN01, SG01, DE01, NL01, PL01 (US01, MX01 hidden: no rows) |
+| `MASK_SUPPLIER_PRICE` | `DIM_SUPPLIER_PART.UNIT_PRICE_AMT`, `FACT_PO_LINE.UNIT_PRICE_AMT` | clear | NULL |
+| `MASK_PENALTY_CLAUSE` | `DIM_CONTRACT.PENALTY_CLAUSE_TEXT` (SV `contracts.contract_penalty_clause`) | clear | `***MASKED***` |
+
+`FACT_GOODS_RECEIPT.UNIT_PRICE_AMT` (invoiced price) is not masked: it is a landed-cost component, and masking it would change Landed Cost for one persona. `CSS_CONTRACTS` serves with owner's rights and can't mask per caller, so `DT_CONTRACT_CHUNK` does not index penalty sections. Certification tags `GOVERNANCE.METRIC_OWNER` / `CERTIFIED` are set on `SV_SUPPLY_CHAIN` and its canonical metrics (`TRUE`); Supplier Contractual OTD % / Gap are `NAMED_VARIANT`. Owner's-rights procedures (`EXPEDITE_PO`, `FLAG_SUPPLIER`) run as SC_ADMIN, so the row access policy sees all plants inside them. They therefore check the caller's session roles (`SYS_CONTEXT('SNOWFLAKE$SESSION', 'IS_ROLE_ACTIVATED', …)`, which needs `READ SESSION` on the account for SC_ADMIN, `sql/00_setup.sql`) against the same `GOV_ROLE_PLANT_ACCESS` mapping. They reject PO lines and suppliers outside the caller's plants with `PLANT_NOT_VISIBLE` and write nothing; if the role context can't be read, they reject every request.
 
 Granted outside `sql/00_setup.sql`: `USAGE` on `CSS_CONTRACTS` (`sql/40_agents_contracts.sql`); `USAGE` on `AGT_SUPPLY_CHAIN`, on the `EXPEDITE_PO` / `FLAG_SUPPLIER` procedures and on `SNOWFLAKE_INTELLIGENCE_OBJECT_DEFAULT` (`sql/40_agents_supply_chain.sql`). Verified 2026-10-04: Cortex Analyst queries through the semantic view need **no** SELECT on `CONFORMED` for persona roles (SELECT on the semantic view is enough), so none is granted.
 
@@ -177,4 +187,4 @@ The consistency tests (see [`../AGENTS.md`](../AGENTS.md)) are what make "one an
 3. **Logic boundary:** no `CONFORMED` column is named like a metric (`*_PCT`, `*_RATE`, `*_OTD`, `DAYS_OF_*`, `LANDED_COST*`), and no app or agent code queries `FACT_*` / `DIM_*` directly.
 4. **Same answer across surfaces:** benchmark questions asked through the agent return the same value as the equivalent `SEMANTIC_VIEW()` query.
 5. **Pipeline health:** no dynamic table in `FAILED` or `UPSTREAM_FAILED` state.
-6. **Access:** persona roles cannot read `RAW_*`, `CONFORMED`, `LEGACY` or `OPS`.
+6. **Access:** persona roles cannot read `RAW_*`, `CONFORMED`, `LEGACY`, `OPS` or `GOVERNANCE`; plant row access and masking hold through the semantic view and the agent (tests `H*`).

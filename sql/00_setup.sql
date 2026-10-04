@@ -57,6 +57,17 @@ CREATE SCHEMA IF NOT EXISTS SC.LEGACY        COMMENT = 'Legacy / migrated object
 CREATE SCHEMA IF NOT EXISTS SC.SEMANTIC      COMMENT = 'Semantic views and consumption layer';
 CREATE SCHEMA IF NOT EXISTS SC.AGENTS        COMMENT = 'Cortex agents and supporting objects';
 CREATE SCHEMA IF NOT EXISTS SC.OPS           COMMENT = 'Operational / monitoring objects';
+CREATE SCHEMA IF NOT EXISTS SC.GOVERNANCE    COMMENT = 'Governance objects: tags, row access / masking policies and their mapping tables (sql/50_governance.sql). SC_ADMIN only; never granted to personas';
+
+-- Certification tags (sql/50_governance.sql item 3). Created here because tags on
+-- semantic-view metrics can only be set in CREATE SEMANTIC VIEW (sql/30), which runs
+-- before sql/50.
+CREATE TAG IF NOT EXISTS SC.GOVERNANCE.METRIC_OWNER
+  ALLOWED_VALUES 'SC_PLANNER', 'SC_PROCUREMENT', 'SC_ADMIN'
+  COMMENT = 'Accountable owner role: on a metric, its owner in docs/metric_contracts.md; on the semantic view, the platform owner SC_ADMIN.';
+CREATE TAG IF NOT EXISTS SC.GOVERNANCE.CERTIFIED
+  ALLOWED_VALUES 'TRUE', 'NAMED_VARIANT'
+  COMMENT = 'TRUE = certified: implements a canonical metric contract of docs/metric_contracts.md. NAMED_VARIANT = contract-defined named variant, NOT certified, never the answer to a canonical question.';
 
 -- Server-side encryption is required for Cortex document functions
 -- (AI_PARSE_DOCUMENT / AI_EXTRACT) to read staged files.
@@ -124,6 +135,13 @@ GRANT SELECT ON FUTURE VIEWS          IN SCHEMA SC.AGENTS    TO ROLE SC_LOGISTIC
 GRANT DATABASE ROLE SNOWFLAKE.CORTEX_USER TO ROLE SC_PLANNER;
 GRANT DATABASE ROLE SNOWFLAKE.CORTEX_USER TO ROLE SC_PROCUREMENT;
 GRANT DATABASE ROLE SNOWFLAKE.CORTEX_USER TO ROLE SC_LOGISTICS;
+
+-- READ SESSION lets owner's-rights procedures owned by SC_ADMIN (SC.AGENTS.EXPEDITE_PO,
+-- FLAG_SUPPLIER) read the CALLER's session roles via SYS_CONTEXT('SNOWFLAKE$SESSION', ...).
+-- Inside them the row access policy sees the owner (all plants), so they check the
+-- caller's plants against SC.GOVERNANCE.GOV_ROLE_PLANT_ACCESS themselves (sql/50 item 1).
+-- Without this grant SYS_CONTEXT returns NULL and both procedures reject every request.
+GRANT READ SESSION ON ACCOUNT TO ROLE SC_ADMIN;
 
 -- -----------------------------------------------------------------------------
 -- 6. Verification

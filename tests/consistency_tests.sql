@@ -540,13 +540,13 @@ SELECT 'F_GR_WEAK_SUPPLIER_PATTERN_IN_BAND',
                 || COALESCE(ROUND(MAX(IFF(NOT IS_WEAK, LAG_DAYS, NULL)), 2)::VARCHAR, 'n/a') || 'd lag'
 FROM g;
 
--- C. Access: personas must not reach RAW_*, CONFORMED, LEGACY, OPS
+-- C. Access: personas must not reach RAW_*, CONFORMED, LEGACY, OPS, GOVERNANCE
 INSERT INTO SC.OPS._RESULTS
 SELECT 'C_PERSONA_NO_ACCESS_RESTRICTED_SCHEMAS', IFF(COUNT(*) = 0, 'PASS', 'FAIL'),
        COUNT(*) || ' persona grants on restricted schemas' ||
        COALESCE(': ' || NULLIF(LISTAGG(ROLE_NAME || ' ' || PRIVILEGE || ' ' || NAME, '; '), ''), '')
 FROM SC.OPS._PERSONA_GRANTS
-WHERE REGEXP_LIKE(NAME, '^"?SC"?\\."?(RAW_[A-Z]+|CONFORMED|LEGACY|OPS)"?(\\..*)?$');
+WHERE REGEXP_LIKE(NAME, '^"?SC"?\\."?(RAW_[A-Z]+|CONFORMED|LEGACY|OPS|GOVERNANCE)"?(\\..*)?$');
 
 -- D. Logic boundary: no metric-like columns outside the semantic view
 --    (also on-time / in-full / OTIF results: windows belong to SV_SUPPLY_CHAIN).
@@ -856,7 +856,8 @@ FROM r CROSS JOIN flags;
 
 -- Search source (DT_CONTRACT_CHUNK): every chunk has a unique id, file path, CONTRACT_NO and
 -- SUPPLIER_NO; its keys equal DIM_CONTRACT (contract <-> supplier <-> PDF); every contract has
--- chunks; chunk text concatenated per file covers the parsed page text (nothing dropped)
+-- chunks; no penalty section is indexed (sql/50 item 2: penalty wording only via the masked
+-- SV dimension); chunk text covers the parsed page text except the penalty sections
 INSERT INTO SC.OPS._RESULTS
 WITH ch AS (SELECT * FROM SC.CONFORMED.DT_CONTRACT_CHUNK),
 k AS (
@@ -872,19 +873,32 @@ cov AS (
   FROM SC.CONFORMED.DIM_CONTRACT c
   LEFT JOIN (SELECT CONTRACT_NO, COUNT(*) n_chunks FROM ch GROUP BY 1) x ON x.CONTRACT_NO = c.CONTRACT_NO
 ),
+excl AS (
+  -- penalty sections, split the same way as DT_CONTRACT_CHUNK: excluded on purpose
+  SELECT p.RELATIVE_PATH, x.VALUE:chunk::VARCHAR AS T
+  FROM SC.RAW_DOCS.CONTRACT_PAGES p,
+       LATERAL FLATTEN(INPUT => SNOWFLAKE.CORTEX.SPLIT_TEXT_MARKDOWN_HEADER(p.PAGE_TEXT, OBJECT_CONSTRUCT('#', 'doc_title', '##', 'section'), 1000, 0)) x
+  WHERE x.VALUE:headers:section::VARCHAR ILIKE '%penalty%'
+),
 txt AS (
-  -- every non-heading line of the page text (signature blanks excluded) appears in a chunk
-  SELECT COUNT(*) missing FROM (
+  -- every non-heading line of the page text (signature blanks excluded) appears in a chunk or in an excluded penalty section
+  SELECT COUNT(*) missing,
+         (SELECT COUNT(*) FROM ch WHERE ch.SECTION_TITLE ILIKE '%penalty%') pen_chunks,
+         (SELECT COUNT(*) FROM excl) pen_excluded
+  FROM (
     SELECT p.RELATIVE_PATH, TRIM(l.VALUE::VARCHAR) line
     FROM SC.RAW_DOCS.CONTRACT_PAGES p, LATERAL FLATTEN(SPLIT(p.PAGE_TEXT, '\n')) l
     WHERE TRIM(l.VALUE::VARCHAR) <> '' AND NOT STARTSWITH(TRIM(l.VALUE::VARCHAR), '#')) pl
   WHERE NOT EXISTS (SELECT 1 FROM ch WHERE ch.DOC_FILE_PATH = pl.RELATIVE_PATH AND CONTAINS(ch.CHUNK_TEXT, pl.line))
+    AND NOT EXISTS (SELECT 1 FROM excl WHERE excl.RELATIVE_PATH = pl.RELATIVE_PATH AND CONTAINS(excl.T, pl.line))
 )
 SELECT 'G_CONTRACT_CHUNKS_KEYED_AND_COMPLETE',
-       IFF(k.n > 0 AND k.nulls = 0 AND k.dup = 0 AND k.off_key = 0 AND cov.no_chunks = 0 AND txt.missing = 0, 'PASS', 'FAIL'),
+       IFF(k.n > 0 AND k.nulls = 0 AND k.dup = 0 AND k.off_key = 0 AND cov.no_chunks = 0 AND txt.missing = 0
+           AND txt.pen_chunks = 0 AND txt.pen_excluded > 0, 'PASS', 'FAIL'),
        k.n || ' chunks for ' || cov.contracts || ' contracts; NULL file/contract/supplier/text: ' || k.nulls || '; duplicate CHUNK_ID: ' || k.dup
        || '; keys disagreeing with DIM_CONTRACT: ' || k.off_key || '; contracts without chunks: ' || cov.no_chunks
        || '; parsed text lines missing from chunks: ' || txt.missing
+       || '; penalty-section chunks indexed: ' || txt.pen_chunks || ' (excluded on purpose: ' || txt.pen_excluded || ')'
 FROM k, cov, txt;
 
 -- Contract terms per PO line (contract v1.4 §1.1): FACT_PO_LINE.CONTRACT_NO is the line's supplier
@@ -1662,7 +1676,8 @@ FROM SC.INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = 'OPS' AND TABLE_NAME LIKE
 
 -- Cortex Search SC.AGENTS.CSS_CONTRACTS (sql/40): active, on DT_CONTRACT_CHUNK (CONFORMED only),
 -- SUPPLIER_NO + CONTRACT_NO attributes, indexes every chunk; "penalty for late delivery" returns
--- penalty sections; filtered to Kronos Castings (SUPPLIER_NO 1000011) it returns only Kronos chunks
+-- NO penalty section (sql/50 item 2: penalty wording only via the masked SV dimension); filtered
+-- to Kronos Castings (SUPPLIER_NO 1000011) it returns only Kronos chunks
 SHOW CORTEX SEARCH SERVICES IN SCHEMA SC.AGENTS;
 CREATE OR REPLACE TEMPORARY TABLE SC.OPS._CSS AS
 SELECT "name" AS NAME, "attribute_columns" AS ATTRS, "search_column" AS SEARCH_COL, "definition" AS DEF,
@@ -1694,10 +1709,10 @@ SELECT 'E_CSS_CONTRACTS_SEARCH_AND_SUPPLIER_FILTER',
            AND MAX(s.SEARCH_COL) = 'CHUNK_TEXT' AND MAX(s.LAG) = '1 day'
            AND MAX(s.DEF) ILIKE '%SC.CONFORMED.DT_CONTRACT_CHUNK%' AND NOT REGEXP_LIKE(MAX(s.DEF), '.*SC\\.(RAW_[A-Z]+|LEGACY|OPS)\\..*', 'is')
            AND MAX(s.N) = (SELECT COUNT(*) FROM SC.CONFORMED.DT_CONTRACT_CHUNK)
-           AND MAX(h.a) = 3 AND MAX(h.a_pen) >= 1 AND MAX(h.k) >= 1 AND MAX(h.k_other) = 0 AND MAX(h.k_pen) = 1, 'PASS', 'FAIL'),
+           AND MAX(h.a) = 3 AND MAX(h.a_pen) = 0 AND MAX(h.k) >= 1 AND MAX(h.k_other) = 0 AND MAX(h.k_pen) = 0, 'PASS', 'FAIL'),
        'service ' || COALESCE(MAX(s.IDX) || '/' || MAX(s.SRV), 'MISSING') || ', attributes ' || COALESCE(MAX(s.ATTRS), 'n/a') || ', lag ' || COALESCE(MAX(s.LAG), 'n/a')
        || ', indexed rows ' || COALESCE(MAX(s.N)::VARCHAR, 'n/a') || '; "penalty for late delivery": ' || MAX(h.a) || ' hits, ' || MAX(h.a_pen)
-       || ' penalty sections; filtered SUPPLIER_NO=1000011 (Kronos): ' || MAX(h.k) || ' hits, ' || MAX(h.k_other) || ' from other suppliers, Kronos penalty clause found: ' || MAX(h.k_pen)
+       || ' penalty sections (expected 0); filtered SUPPLIER_NO=1000011 (Kronos): ' || MAX(h.k) || ' hits, ' || MAX(h.k_other) || ' from other suppliers, Kronos penalty clause found: ' || MAX(h.k_pen) || ' (expected 0)'
 FROM h LEFT JOIN s ON TRUE;
 
 -- Agent SC.AGENTS.AGT_SUPPLY_CHAIN (sql/40_agents_supply_chain.sql): Claude orchestration, exactly the
@@ -1751,7 +1766,9 @@ r AS (SELECT COLUMN1 AS RULE, COLUMN2 AS PATTERN FROM VALUES
   ('evidence coverage',                     '%evidence coverage%'),
   ('calendar month for contractual OTD',    '%Contractual OTD%calendar month%'),
   ('pro-forma label',                       '%pro-forma:%contract terms (effective <contract effective date>) applied to earlier PO lines%'),
-  ('penalty clause with contract no.',      '%filtered by its SUPPLIER_NO and quote the clause verbatim with its CONTRACT_NO%'),
+  ('penalty clause with contract no.',      '%get its penalty terms from supply_chain_metrics and quote the clause verbatim%with its CONTRACT_NO%'),
+  ('penalty clause not from search',        '%Penalty clauses are NOT in%contract_search%'),
+  ('masked clause never reconstructed',     '%***MASKED***%never reconstruct%'),
   ('confirm before write',                  '%do NOT call expedite_po or flag_supplier%Shall I write this request?%Only when the user''s next message clearly confirms%'),
   ('same answer for every persona',         '%same number for the same question%'))
 SELECT 'E_AGENT_INSTRUCTIONS_FOLLOW_CONTRACTS', IFF(COUNT_IF(i.T IS NULL OR i.T NOT ILIKE r.PATTERN ESCAPE '\\') = 0, 'PASS', 'FAIL'),
@@ -1786,10 +1803,14 @@ SELECT 'E_AGENT_ACTION_TOOLS_DEFINED',
        IFF(COUNT(p.PROCEDURE_NAME) = 2 AND COUNT_IF(p.PROCEDURE_OWNER = 'SC_ADMIN') = 2
            AND COUNT_IF(p.PROCEDURE_DEFINITION ILIKE '%SEMANTIC_VIEW(SC.SEMANTIC.SV_SUPPLY_CHAIN%' AND p.PROCEDURE_DEFINITION ILIKE '%INSERT INTO SC.OPS.ALERT_AGENT_ACTIONS%') = 2
            AND COUNT_IF(REGEXP_LIKE(p.PROCEDURE_DEFINITION, '.*(CONFORMED|RAW_[A-Z]|LEGACY|FACT_|DIM_).*', 'is')) = 0
+           AND COUNT_IF(p.PROCEDURE_DEFINITION ILIKE '%SC.GOVERNANCE.GOV_ROLE_PLANT_ACCESS%'
+                        AND p.PROCEDURE_DEFINITION ILIKE '%IS_ROLE_ACTIVATED%' AND p.PROCEDURE_DEFINITION ILIKE '%PLANT_NOT_VISIBLE%') = 2
            AND MAX(g.N) = 6
            AND (SELECT COUNT(*) FROM SC.INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = 'OPS' AND TABLE_NAME = 'ALERT_AGENT_ACTIONS') = 1, 'PASS', 'FAIL'),
        COUNT(p.PROCEDURE_NAME) || '/2 procedures, ' || COUNT_IF(p.PROCEDURE_OWNER = 'SC_ADMIN') || ' owned by SC_ADMIN, '
-       || COUNT_IF(REGEXP_LIKE(p.PROCEDURE_DEFINITION, '.*(CONFORMED|RAW_[A-Z]|LEGACY|FACT_|DIM_).*', 'is')) || ' with forbidden refs; persona USAGE grants '
+       || COUNT_IF(REGEXP_LIKE(p.PROCEDURE_DEFINITION, '.*(CONFORMED|RAW_[A-Z]|LEGACY|FACT_|DIM_).*', 'is')) || ' with forbidden refs, '
+       || COUNT_IF(p.PROCEDURE_DEFINITION ILIKE '%SC.GOVERNANCE.GOV_ROLE_PLANT_ACCESS%' AND p.PROCEDURE_DEFINITION ILIKE '%IS_ROLE_ACTIVATED%'
+                   AND p.PROCEDURE_DEFINITION ILIKE '%PLANT_NOT_VISIBLE%') || '/2 with the caller plant check (GOV_ROLE_PLANT_ACCESS); persona USAGE grants '
        || MAX(g.N) || '/6'
 FROM p, g;
 
@@ -1986,12 +2007,12 @@ c AS (SELECT contract_no AS N, ROUND(100 * contract_late_penalty_per_day, 1)::NU
 SELECT 'E_AGENT_Q4_CONTRACT_GAP_AND_KRONOS_PENALTY',
        IFF(a.ERR IS NULL AND CONTAINS(a.TXT, k.P) AND CONTAINS(a.TXT, k.T) AND CONTAINS(a.TXT, k.L) AND a.TXT ILIKE '%calendar month%'
            AND (k.PF = 0 OR a.TXT ILIKE '%pro-forma%') AND CONTAINS(a.TXT, c.N) AND CONTAINS(a.TXT, c.PD) AND CONTAINS(a.TXT, c.CAP)
-           AND a.SV_SQL > 0 AND a.KRONOS_SEARCH > 0 AND a.BAD_REFS = 0, 'PASS', 'FAIL'),
+           AND a.SV_SQL > 0 AND a.BAD_REFS = 0, 'PASS', 'FAIL'),
        'semantic view: Kronos ' || k.P || ' vs ' || k.T || '%, ' || k.L || ', ' || k.PF || ' pro-forma lines; contract ' || c.N || ' ' || c.PD || '/day cap ' || c.CAP
        || '; answer has value ' || IFF(CONTAINS(a.TXT, k.P), 'yes', 'no') || ', target ' || IFF(CONTAINS(a.TXT, k.T), 'yes', 'no')
        || ', calendar month ' || IFF(a.TXT ILIKE '%calendar month%' AND CONTAINS(a.TXT, k.L), 'yes', 'no') || ', pro-forma ' || IFF(a.TXT ILIKE '%pro-forma%', 'yes', 'no')
        || ', contract no ' || IFF(CONTAINS(a.TXT, c.N), 'yes', 'no') || ', penalty ' || IFF(CONTAINS(a.TXT, c.PD) AND CONTAINS(a.TXT, c.CAP), 'yes', 'no')
-       || '; contract_search filtered on 1000011: ' || COALESCE(a.KRONOS_SEARCH, 0) || COALESCE('; ERROR ' || a.ERR, '')
+       || '; contract_search filtered on 1000011 (optional): ' || COALESCE(a.KRONOS_SEARCH, 0) || COALESCE('; ERROR ' || a.ERR, '')
 FROM k, c LEFT JOIN SC.OPS._AGENT_ANS a ON a.Q_ID = 'Q4';
 
 INSERT INTO SC.OPS._AGENT_CHECKS
@@ -2010,6 +2031,558 @@ UNION ALL
 SELECT 'E_AGENT_MATCHES_SEMANTIC_VIEW', IFF(COUNT_IF(STATUS = 'PASS') = 5 AND COUNT(*) = 5, 'PASS', 'FAIL'),
        COUNT_IF(STATUS = 'PASS') || '/5 benchmark questions (tests/agent_questions.yaml) pass through the agent' || COALESCE('; failing: ' || NULLIF(LISTAGG(IFF(STATUS <> 'PASS', TEST_NAME, NULL), ', '), ''), '')
 FROM SC.OPS._AGENT_CHECKS;
+
+-- -----------------------------------------------------------------------------
+-- H. Governance (sql/50_governance.sql)
+-- -----------------------------------------------------------------------------
+-- H1. Row access RAP_PLANT_ACCESS on DIM_PLANT + the 5 plant-level facts (CREATE OR REPLACE in
+-- sql/20 drops it: re-run sql/50), mapping = region scopes expanded from DIM_PLANT (logistics =
+-- APAC + EMEA incl. IN01 and DE01, at least one plant hidden), protected DTs still refresh.
+INSERT INTO SC.OPS._RESULTS
+WITH exp AS (SELECT COLUMN1 AS T, COLUMN2 AS C FROM VALUES ('DIM_PLANT', 'PLANT_CODE'), ('FACT_ORDER_LINE', 'PLANT_CODE'),
+               ('FACT_SHIPMENT', 'ORIGIN_PLANT_CODE'), ('FACT_PO_LINE', 'PLANT_CODE'), ('FACT_GOODS_RECEIPT', 'PLANT_CODE'),
+               ('FACT_INVENTORY_SNAPSHOT', 'PLANT_CODE')),
+ref AS (SELECT REF_SCHEMA_NAME, REF_ENTITY_NAME, REF_ARG_COLUMN_NAMES, POLICY_STATUS
+        FROM TABLE(SC.INFORMATION_SCHEMA.POLICY_REFERENCES(POLICY_NAME => 'SC.GOVERNANCE.RAP_PLANT_ACCESS')))
+SELECT 'H1_GOV_RAP_PLANT_ACCESS_ATTACHED',
+       IFF(COUNT_IF(r.REF_ENTITY_NAME IS NULL) = 0 AND (SELECT COUNT(*) FROM ref) = 6
+           AND COUNT_IF(r.REF_SCHEMA_NAME = 'CONFORMED' AND r.REF_ARG_COLUMN_NAMES ILIKE '%' || e.C || '%' AND r.POLICY_STATUS = 'ACTIVE') = 6, 'PASS', 'FAIL'),
+       COUNT_IF(r.REF_ENTITY_NAME IS NOT NULL) || '/6 plant-level tables protected (' || (SELECT COUNT(*) FROM ref) || ' references in total)'
+       || COALESCE('; missing: ' || NULLIF(LISTAGG(IFF(r.REF_ENTITY_NAME IS NULL, e.T, NULL), ', '), ''), '')
+FROM exp e LEFT JOIN ref r ON r.REF_ENTITY_NAME = e.T;
+
+INSERT INTO SC.OPS._RESULTS
+WITH m AS (SELECT * FROM SC.GOVERNANCE.GOV_ROLE_PLANT_ACCESS),
+p AS (SELECT PLANT_CODE, REGION FROM SC.CONFORMED.DIM_PLANT),
+lg AS (SELECT LISTAGG(PLANT_CODE, ',') WITHIN GROUP (ORDER BY PLANT_CODE) AS V FROM m WHERE ROLE_NAME = 'SC_LOGISTICS'),
+ex AS (SELECT LISTAGG(PLANT_CODE, ',') WITHIN GROUP (ORDER BY PLANT_CODE) AS V FROM p WHERE REGION IN ('APAC', 'EMEA')),
+hid AS (SELECT LISTAGG(PLANT_CODE, ',') WITHIN GROUP (ORDER BY PLANT_CODE) AS V FROM p
+        WHERE PLANT_CODE NOT IN (SELECT PLANT_CODE FROM m WHERE ROLE_NAME = 'SC_LOGISTICS'))
+SELECT 'H1_GOV_PLANT_MAPPING_MATCHES_REGIONS',
+       IFF((SELECT COUNT(*) FROM m WHERE PLANT_CODE = '*' AND ROLE_NAME IN ('SC_ADMIN', 'SC_PLANNER', 'SC_PROCUREMENT')) = 3
+           AND (SELECT COUNT(*) FROM m WHERE PLANT_CODE = '*') = 3
+           AND lg.V = ex.V AND CONTAINS(lg.V, 'IN01') AND CONTAINS(lg.V, 'DE01') AND hid.V IS NOT NULL
+           AND (SELECT COUNT(*) FROM m WHERE ROLE_NAME NOT IN ('SC_ADMIN', 'SC_PLANNER', 'SC_PROCUREMENT', 'SC_LOGISTICS')) = 0, 'PASS', 'FAIL'),
+       'all plants: ' || (SELECT LISTAGG(ROLE_NAME, ', ') WITHIN GROUP (ORDER BY ROLE_NAME) FROM m WHERE PLANT_CODE = '*')
+       || '; SC_LOGISTICS: ' || COALESCE(lg.V, 'none') || ' (APAC + EMEA in DIM_PLANT: ' || COALESCE(ex.V, 'none') || '); hidden from SC_LOGISTICS: ' || COALESCE(hid.V, 'none')
+FROM lg, ex, hid;
+
+SHOW DYNAMIC TABLES IN SCHEMA SC.CONFORMED;
+CREATE OR REPLACE TEMPORARY TABLE SC.OPS._GOV_DTS AS
+SELECT "name" AS NAME, "scheduling_state" AS SCHEDULING_STATE, "data_timestamp" AS DATA_TS FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+INSERT INTO SC.OPS._RESULTS
+WITH prot AS (SELECT DISTINCT REF_ENTITY_NAME AS NAME FROM TABLE(SC.INFORMATION_SCHEMA.POLICY_REFERENCES(POLICY_NAME => 'SC.GOVERNANCE.RAP_PLANT_ACCESS'))),
+st AS (SELECT p.NAME, d.SCHEDULING_STATE, h.STATE AS LAST_STATE, DATEDIFF(minute, d.DATA_TS, CURRENT_TIMESTAMP()) AS AGE_MIN,
+              d.SCHEDULING_STATE = 'ACTIVE' AND h.STATE IS DISTINCT FROM 'FAILED' AND h.STATE IS DISTINCT FROM 'UPSTREAM_FAILED'
+              AND DATEDIFF(minute, d.DATA_TS, CURRENT_TIMESTAMP()) <= 120 AS OK
+       FROM prot p LEFT JOIN SC.OPS._GOV_DTS d ON d.NAME = p.NAME LEFT JOIN SC.OPS._DT_LAST h ON h.NAME = p.NAME)
+SELECT 'H1_GOV_PROTECTED_DTS_REFRESH',
+       IFF(COUNT(*) = 6 AND COUNT_IF(OK) = 6, 'PASS', 'FAIL'),
+       COUNT_IF(OK) || '/' || COUNT(*) || ' row-access-protected dynamic tables ACTIVE, last refresh not failed, data <= 120 min old (target lag 1 hour)'
+       || COALESCE('; not ok: ' || NULLIF(LISTAGG(IFF(OK, NULL, NAME || ' ' || COALESCE(LAST_STATE, 'no refresh in history') || '/'
+                                                       || COALESCE(SCHEDULING_STATE, '?') || '/' || COALESCE(AGE_MIN::VARCHAR, '?') || ' min'), ', '), ''), '')
+FROM st;
+
+-- H1 role by role through SV_SUPPLY_CHAIN (secondary roles off). Each persona returns
+-- ROLE|visible plants|MD5 of per-plant Customer OTD % last fiscal month|MD5 of per-plant Days of Inventory
+-- (latest snapshot)|rows for hidden plant US01|OTD IN01 %|DOI DE01 (session variables hold <= 256 bytes).
+-- Expected = SC_ADMIN's per-plant values restricted to the role's plants in GOV_ROLE_PLANT_ACCESS.
+CREATE OR REPLACE TEMPORARY TABLE SC.OPS._GOV_ADMIN_PLANT AS
+WITH pl AS (SELECT plant_code FROM SEMANTIC_VIEW(SC.SEMANTIC.SV_SUPPLY_CHAIN DIMENSIONS plants.plant_code)),
+o AS (SELECT plant_code, customer_otd_pct AS v FROM SEMANTIC_VIEW(SC.SEMANTIC.SV_SUPPLY_CHAIN DIMENSIONS plants.plant_code
+        METRICS order_lines.customer_otd_pct WHERE dates.fiscal_month_offset = -1)),
+d AS (SELECT plant_code, days_of_inventory AS v FROM SEMANTIC_VIEW(SC.SEMANTIC.SV_SUPPLY_CHAIN DIMENSIONS plants.plant_code
+        METRICS inventory.days_of_inventory))
+SELECT pl.plant_code AS PLANT_CODE, COALESCE(TO_VARCHAR(ROUND(o.v, 6)), 'n/a') AS OTD, COALESCE(TO_VARCHAR(ROUND(d.v, 6)), 'n/a') AS DOI,
+       ROUND(100 * o.v, 1)::NUMBER(5,1)::VARCHAR AS OTD_PCT_1, ROUND(d.v, 1)::NUMBER(9,1)::VARCHAR AS DOI_1
+FROM pl LEFT JOIN o ON o.plant_code = pl.plant_code LEFT JOIN d ON d.plant_code = pl.plant_code;
+USE SECONDARY ROLES NONE;
+USE ROLE SC_PLANNER;
+EXECUTE IMMEDIATE $$
+DECLARE out VARCHAR;
+BEGIN
+  WITH pl AS (SELECT plant_code FROM SEMANTIC_VIEW(SC.SEMANTIC.SV_SUPPLY_CHAIN DIMENSIONS plants.plant_code)),
+  o AS (SELECT plant_code, customer_otd_pct AS v FROM SEMANTIC_VIEW(SC.SEMANTIC.SV_SUPPLY_CHAIN DIMENSIONS plants.plant_code
+          METRICS order_lines.customer_otd_pct WHERE dates.fiscal_month_offset = -1)),
+  d AS (SELECT plant_code, days_of_inventory AS v FROM SEMANTIC_VIEW(SC.SEMANTIC.SV_SUPPLY_CHAIN DIMENSIONS plants.plant_code
+          METRICS inventory.days_of_inventory)),
+  u AS (SELECT COUNT(*) AS n FROM SEMANTIC_VIEW(SC.SEMANTIC.SV_SUPPLY_CHAIN DIMENSIONS plants.plant_code
+          METRICS order_lines.customer_otd_pct WHERE plants.plant_code = 'US01' AND dates.fiscal_month_offset = -1))
+  SELECT CURRENT_ROLE() || '|' || LISTAGG(pl.plant_code, ',') WITHIN GROUP (ORDER BY pl.plant_code) || '|'
+      || MD5(LISTAGG(pl.plant_code || ':' || COALESCE(TO_VARCHAR(ROUND(o.v, 6)), 'n/a'), ',') WITHIN GROUP (ORDER BY pl.plant_code)) || '|'
+      || MD5(LISTAGG(pl.plant_code || ':' || COALESCE(TO_VARCHAR(ROUND(d.v, 6)), 'n/a'), ',') WITHIN GROUP (ORDER BY pl.plant_code)) || '|'
+      || MAX(u.n) || '|'
+      || COALESCE(MAX(IFF(pl.plant_code = 'IN01', TO_VARCHAR(ROUND(100 * o.v, 1)::NUMBER(5,1)), NULL)), 'none') || '|'
+      || COALESCE(MAX(IFF(pl.plant_code = 'DE01', TO_VARCHAR(ROUND(d.v, 1)::NUMBER(9,1)), NULL)), 'none')
+    INTO :out
+  FROM pl LEFT JOIN o ON o.plant_code = pl.plant_code LEFT JOIN d ON d.plant_code = pl.plant_code CROSS JOIN u;
+  RETURN out;
+EXCEPTION WHEN OTHER THEN RETURN 'ERROR|' || LEFT(SQLERRM, 200);
+END;
+$$;
+SET GOV_SV_PLANNER = (SELECT LEFT($1, 250) FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())));
+USE ROLE SC_PROCUREMENT;
+EXECUTE IMMEDIATE $$
+DECLARE out VARCHAR;
+BEGIN
+  WITH pl AS (SELECT plant_code FROM SEMANTIC_VIEW(SC.SEMANTIC.SV_SUPPLY_CHAIN DIMENSIONS plants.plant_code)),
+  o AS (SELECT plant_code, customer_otd_pct AS v FROM SEMANTIC_VIEW(SC.SEMANTIC.SV_SUPPLY_CHAIN DIMENSIONS plants.plant_code
+          METRICS order_lines.customer_otd_pct WHERE dates.fiscal_month_offset = -1)),
+  d AS (SELECT plant_code, days_of_inventory AS v FROM SEMANTIC_VIEW(SC.SEMANTIC.SV_SUPPLY_CHAIN DIMENSIONS plants.plant_code
+          METRICS inventory.days_of_inventory)),
+  u AS (SELECT COUNT(*) AS n FROM SEMANTIC_VIEW(SC.SEMANTIC.SV_SUPPLY_CHAIN DIMENSIONS plants.plant_code
+          METRICS order_lines.customer_otd_pct WHERE plants.plant_code = 'US01' AND dates.fiscal_month_offset = -1))
+  SELECT CURRENT_ROLE() || '|' || LISTAGG(pl.plant_code, ',') WITHIN GROUP (ORDER BY pl.plant_code) || '|'
+      || MD5(LISTAGG(pl.plant_code || ':' || COALESCE(TO_VARCHAR(ROUND(o.v, 6)), 'n/a'), ',') WITHIN GROUP (ORDER BY pl.plant_code)) || '|'
+      || MD5(LISTAGG(pl.plant_code || ':' || COALESCE(TO_VARCHAR(ROUND(d.v, 6)), 'n/a'), ',') WITHIN GROUP (ORDER BY pl.plant_code)) || '|'
+      || MAX(u.n) || '|'
+      || COALESCE(MAX(IFF(pl.plant_code = 'IN01', TO_VARCHAR(ROUND(100 * o.v, 1)::NUMBER(5,1)), NULL)), 'none') || '|'
+      || COALESCE(MAX(IFF(pl.plant_code = 'DE01', TO_VARCHAR(ROUND(d.v, 1)::NUMBER(9,1)), NULL)), 'none')
+    INTO :out
+  FROM pl LEFT JOIN o ON o.plant_code = pl.plant_code LEFT JOIN d ON d.plant_code = pl.plant_code CROSS JOIN u;
+  RETURN out;
+EXCEPTION WHEN OTHER THEN RETURN 'ERROR|' || LEFT(SQLERRM, 200);
+END;
+$$;
+SET GOV_SV_PROCUREMENT = (SELECT LEFT($1, 250) FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())));
+USE ROLE SC_LOGISTICS;
+EXECUTE IMMEDIATE $$
+DECLARE out VARCHAR;
+BEGIN
+  WITH pl AS (SELECT plant_code FROM SEMANTIC_VIEW(SC.SEMANTIC.SV_SUPPLY_CHAIN DIMENSIONS plants.plant_code)),
+  o AS (SELECT plant_code, customer_otd_pct AS v FROM SEMANTIC_VIEW(SC.SEMANTIC.SV_SUPPLY_CHAIN DIMENSIONS plants.plant_code
+          METRICS order_lines.customer_otd_pct WHERE dates.fiscal_month_offset = -1)),
+  d AS (SELECT plant_code, days_of_inventory AS v FROM SEMANTIC_VIEW(SC.SEMANTIC.SV_SUPPLY_CHAIN DIMENSIONS plants.plant_code
+          METRICS inventory.days_of_inventory)),
+  u AS (SELECT COUNT(*) AS n FROM SEMANTIC_VIEW(SC.SEMANTIC.SV_SUPPLY_CHAIN DIMENSIONS plants.plant_code
+          METRICS order_lines.customer_otd_pct WHERE plants.plant_code = 'US01' AND dates.fiscal_month_offset = -1))
+  SELECT CURRENT_ROLE() || '|' || LISTAGG(pl.plant_code, ',') WITHIN GROUP (ORDER BY pl.plant_code) || '|'
+      || MD5(LISTAGG(pl.plant_code || ':' || COALESCE(TO_VARCHAR(ROUND(o.v, 6)), 'n/a'), ',') WITHIN GROUP (ORDER BY pl.plant_code)) || '|'
+      || MD5(LISTAGG(pl.plant_code || ':' || COALESCE(TO_VARCHAR(ROUND(d.v, 6)), 'n/a'), ',') WITHIN GROUP (ORDER BY pl.plant_code)) || '|'
+      || MAX(u.n) || '|'
+      || COALESCE(MAX(IFF(pl.plant_code = 'IN01', TO_VARCHAR(ROUND(100 * o.v, 1)::NUMBER(5,1)), NULL)), 'none') || '|'
+      || COALESCE(MAX(IFF(pl.plant_code = 'DE01', TO_VARCHAR(ROUND(d.v, 1)::NUMBER(9,1)), NULL)), 'none')
+    INTO :out
+  FROM pl LEFT JOIN o ON o.plant_code = pl.plant_code LEFT JOIN d ON d.plant_code = pl.plant_code CROSS JOIN u;
+  RETURN out;
+EXCEPTION WHEN OTHER THEN RETURN 'ERROR|' || LEFT(SQLERRM, 200);
+END;
+$$;
+SET GOV_SV_LOGISTICS = (SELECT LEFT($1, 250) FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())));
+-- the hidden plant through the agent as SC_LOGISTICS: ROLE|NUMBER or none|access errors (self-corrected SQL slips are not counted)|SQL on SV|answer start
+EXECUTE IMMEDIATE $$
+DECLARE out VARCHAR;
+BEGIN
+  WITH r AS (SELECT TRY_PARSE_JSON(SNOWFLAKE.CORTEX.DATA_AGENT_RUN('SC.AGENTS.AGT_SUPPLY_CHAIN',
+               '{"messages": [{"role": "user", "content": [{"type": "text", "text": "What was on-time delivery for Memphis last month?"}]}]}')) AS R),
+  a AS (SELECT LISTAGG(IFF(c.VALUE:type = 'text', c.VALUE:text::VARCHAR, NULL), '') WITHIN GROUP (ORDER BY c.INDEX) AS TXT,
+               COUNT_IF(c.VALUE:tool_use:input:sql::VARCHAR ILIKE '%SEMANTIC_VIEW(SC.SEMANTIC.SV_SUPPLY_CHAIN%') AS SV,
+               COUNT_IF(c.VALUE:type = 'tool_result' AND c.VALUE:tool_result:status::VARCHAR = 'error'
+                        AND REGEXP_LIKE(c.VALUE:tool_result:content::VARCHAR, '.*(insufficient privileges|not authorized|access denied|access control).*', 'is')) AS ERRS
+        FROM r, LATERAL FLATTEN(INPUT => r.R:content, OUTER => TRUE) c)
+  SELECT CURRENT_ROLE() || '|' || IFF(REGEXP_LIKE(TXT, '.*[0-9]+\\.[0-9] ?%.*', 's'), 'NUMBER', 'none') || '|' || ERRS || '|' || SV || '|'
+         || COALESCE(LEFT(REGEXP_REPLACE(TXT, '\\s+', ' '), 150), 'EMPTY')
+    INTO :out FROM a;
+  RETURN out;
+EXCEPTION WHEN OTHER THEN RETURN 'ERROR|' || LEFT(SQLERRM, 200);
+END;
+$$;
+SET GOV_AGENT_HIDDEN = (SELECT LEFT($1, 250) FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())));
+USE ROLE SC_ADMIN;
+USE SECONDARY ROLES ALL;
+
+INSERT INTO SC.OPS._RESULTS
+WITH s AS (SELECT SPLIT_PART(COLUMN1, '|', 1) AS ROLE_NAME, COLUMN1 AS V, SPLIT_PART(COLUMN1, '|', 2) AS PLANTS,
+                  SPLIT_PART(COLUMN1, '|', 3) AS OTD_MD5, SPLIT_PART(COLUMN1, '|', 4) AS DOI_MD5, SPLIT_PART(COLUMN1, '|', 5) AS US01_ROWS,
+                  SPLIT_PART(COLUMN1, '|', 6) AS OTD_IN01, SPLIT_PART(COLUMN1, '|', 7) AS DOI_DE01
+           FROM VALUES ($GOV_SV_PLANNER), ($GOV_SV_PROCUREMENT), ($GOV_SV_LOGISTICS)),
+e AS (SELECT m.ROLE_NAME, LISTAGG(a.PLANT_CODE, ',') WITHIN GROUP (ORDER BY a.PLANT_CODE) AS PLANTS,
+             MD5(LISTAGG(a.PLANT_CODE || ':' || a.OTD, ',') WITHIN GROUP (ORDER BY a.PLANT_CODE)) AS OTD_MD5,
+             MD5(LISTAGG(a.PLANT_CODE || ':' || a.DOI, ',') WITHIN GROUP (ORDER BY a.PLANT_CODE)) AS DOI_MD5
+      FROM SC.OPS._GOV_ADMIN_PLANT a JOIN SC.GOVERNANCE.GOV_ROLE_PLANT_ACCESS m ON m.PLANT_CODE IN ('*', a.PLANT_CODE)
+      GROUP BY m.ROLE_NAME),
+x AS (SELECT MAX(IFF(PLANT_CODE = 'IN01', OTD_PCT_1, NULL)) AS OTD_IN01, MAX(IFF(PLANT_CODE = 'DE01', DOI_1, NULL)) AS DOI_DE01,
+             COUNT(*) AS N_ALL FROM SC.OPS._GOV_ADMIN_PLANT)
+SELECT 'H1_GOV_PERSONA_ROWS_THROUGH_SEMANTIC_VIEW',
+       IFF(COUNT(*) = 3 AND COUNT_IF(s.V LIKE 'ERROR|%' OR s.V IS NULL) = 0
+           AND COUNT_IF(s.PLANTS = e.PLANTS AND s.OTD_MD5 = e.OTD_MD5 AND s.DOI_MD5 = e.DOI_MD5) = 3
+           AND COUNT_IF(s.OTD_IN01 = x.OTD_IN01 AND s.DOI_DE01 = x.DOI_DE01) = 3
+           AND COUNT_IF(s.ROLE_NAME = 'SC_LOGISTICS' AND s.US01_ROWS = '0') = 1
+           AND COUNT_IF(s.ROLE_NAME <> 'SC_LOGISTICS' AND s.US01_ROWS = '1') = 2
+           AND COUNT_IF(s.ROLE_NAME = 'SC_LOGISTICS' AND ARRAY_SIZE(SPLIT(s.PLANTS, ',')) < x.N_ALL) = 1, 'PASS', 'FAIL'),
+       'SC_ADMIN: IN01 OTD ' || MAX(x.OTD_IN01) || '%, DE01 DOI ' || MAX(x.DOI_DE01) || ', ' || MAX(x.N_ALL) || ' plants; '
+       || LISTAGG(s.ROLE_NAME || ': plants ' || s.PLANTS || IFF(s.PLANTS = e.PLANTS, '', ' (expected ' || COALESCE(e.PLANTS, '?') || ')')
+               || ', per-plant OTD + DOI = admin: ' || IFF(s.OTD_MD5 = e.OTD_MD5 AND s.DOI_MD5 = e.DOI_MD5, 'yes', 'NO')
+               || ', IN01 OTD ' || s.OTD_IN01 || '%, DE01 DOI ' || s.DOI_DE01 || ', US01 rows ' || s.US01_ROWS
+               || IFF(s.V LIKE 'ERROR|%', ' ' || s.V, ''), '; ') WITHIN GROUP (ORDER BY s.ROLE_NAME)
+FROM s LEFT JOIN e ON e.ROLE_NAME = s.ROLE_NAME CROSS JOIN x;
+
+INSERT INTO SC.OPS._RESULTS
+SELECT 'H1_GOV_HIDDEN_PLANT_THROUGH_AGENT',
+       IFF(SPLIT_PART($GOV_AGENT_HIDDEN, '|', 1) = 'SC_LOGISTICS' AND SPLIT_PART($GOV_AGENT_HIDDEN, '|', 2) = 'none'
+           AND SPLIT_PART($GOV_AGENT_HIDDEN, '|', 3) = '0' AND SPLIT_PART($GOV_AGENT_HIDDEN, '|', 5) NOT IN ('', 'EMPTY'), 'PASS', 'FAIL'),
+       'as SC_LOGISTICS "What was on-time delivery for Memphis last month?" role|number in answer|access errors|SQL on SV|answer: ' || $GOV_AGENT_HIDDEN;
+
+-- H1 action tools (sql/40): owner's-rights EXPEDITE_PO / FLAG_SUPPLIER check the CALLER's plants against
+-- GOV_ROLE_PLANT_ACCESS (READ SESSION on SC_ADMIN, sql/00). As SC_LOGISTICS, inside a rolled-back transaction:
+-- a PO line at hidden plant US01 -> REJECTED / PLANT_NOT_VISIBLE, no plant or supplier in the reply, 0 audit rows;
+-- a PO line at visible plant IN01 -> CONFIRMED with 1 audit row; Kronos (delivers to visible plants) -> CONFIRMED.
+SET GOV_PO_HIDDEN  = (SELECT PO_NO || '|' || PO_LINE_NO FROM SC.CONFORMED.FACT_PO_LINE WHERE PLANT_CODE = 'US01' ORDER BY PO_NO, PO_LINE_NO LIMIT 1);
+SET GOV_PO_VISIBLE = (SELECT PO_NO || '|' || PO_LINE_NO FROM SC.CONFORMED.FACT_PO_LINE WHERE PLANT_CODE = 'IN01' ORDER BY PO_NO, PO_LINE_NO LIMIT 1);
+SHOW GRANTS TO ROLE SC_ADMIN;
+SET GOV_READ_SESSION = (SELECT COUNT(*) FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())) WHERE "privilege" = 'READ SESSION' AND "granted_on" = 'ACCOUNT');
+USE SECONDARY ROLES NONE;
+USE ROLE SC_LOGISTICS;
+BEGIN TRANSACTION;
+CALL SC.AGENTS.EXPEDITE_PO(SPLIT_PART($GOV_PO_HIDDEN, '|', 1), SPLIT_PART($GOV_PO_HIDDEN, '|', 2), 'consistency test hidden plant (rolled back)');
+SET GOV_EXP_HIDDEN = (SELECT $1:status::VARCHAR || '|' || COALESCE($1:reason_code::VARCHAR, '') || '|'
+                             || IFF($1:plant_code IS NULL AND $1:supplier_no IS NULL AND $1:supplier_name IS NULL, 'no details', 'DETAILS') || '|'
+                             || LEFT(COALESCE($1:error::VARCHAR, ''), 150)
+                      FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())));
+CALL SC.AGENTS.EXPEDITE_PO(SPLIT_PART($GOV_PO_VISIBLE, '|', 1), SPLIT_PART($GOV_PO_VISIBLE, '|', 2), 'consistency test visible plant (rolled back)');
+SET GOV_EXP_VISIBLE = (SELECT $1:status::VARCHAR || '|' || COALESCE($1:confirmation_id::VARCHAR, '') || '|' || COALESCE($1:plant_code::VARCHAR, '')
+                       FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())));
+CALL SC.AGENTS.FLAG_SUPPLIER('1000011', 'consistency test flag (rolled back)', 'test evidence');
+SET GOV_FLG_LOGISTICS = (SELECT $1:status::VARCHAR FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())));
+USE ROLE SC_ADMIN;
+SET GOV_ACT_ROWS = (SELECT COUNT_IF(ACTION_TYPE = 'EXPEDITE_PO' AND PO_NO = SPLIT_PART($GOV_PO_HIDDEN, '|', 1) AND PO_LINE_NO = SPLIT_PART($GOV_PO_HIDDEN, '|', 2)::NUMBER)
+                           || '|' || COUNT_IF(CONFIRMATION_ID = SPLIT_PART($GOV_EXP_VISIBLE, '|', 2))
+                    FROM SC.OPS.ALERT_AGENT_ACTIONS WHERE SESSION_ID = CURRENT_SESSION()::NUMBER);
+ROLLBACK;
+USE SECONDARY ROLES ALL;
+INSERT INTO SC.OPS._RESULTS
+SELECT 'H1_GOV_ACTION_TOOLS_RESPECT_PLANT_ACCESS',
+       IFF($GOV_READ_SESSION = 1
+           AND SPLIT_PART($GOV_EXP_HIDDEN, '|', 1) = 'REJECTED' AND SPLIT_PART($GOV_EXP_HIDDEN, '|', 2) = 'PLANT_NOT_VISIBLE'
+           AND SPLIT_PART($GOV_EXP_HIDDEN, '|', 3) = 'no details' AND SPLIT_PART($GOV_ACT_ROWS, '|', 1) = '0'
+           AND SPLIT_PART($GOV_EXP_VISIBLE, '|', 1) = 'CONFIRMED' AND SPLIT_PART($GOV_EXP_VISIBLE, '|', 3) = 'IN01'
+           AND SPLIT_PART($GOV_ACT_ROWS, '|', 2) = '1' AND $GOV_FLG_LOGISTICS = 'CONFIRMED' AND COUNT(*) = 0, 'PASS', 'FAIL'),
+       'SC_ADMIN READ SESSION: ' || IFF($GOV_READ_SESSION = 1, 'yes', 'NO') || '; as SC_LOGISTICS: expedite ' || $GOV_PO_HIDDEN || ' (US01) -> ' || $GOV_EXP_HIDDEN
+       || '; audit rows for it ' || SPLIT_PART($GOV_ACT_ROWS, '|', 1) || '; expedite ' || $GOV_PO_VISIBLE || ' (IN01) -> ' || $GOV_EXP_VISIBLE
+       || ', audit rows ' || SPLIT_PART($GOV_ACT_ROWS, '|', 2) || '; flag 1000011 -> ' || $GOV_FLG_LOGISTICS || '; left after ROLLBACK ' || COUNT(*)
+FROM SC.OPS.ALERT_AGENT_ACTIONS WHERE REASON ILIKE 'consistency test % plant (rolled back)' OR REASON = 'consistency test flag (rolled back)';
+
+-- H2. Masking (sql/50 item 2): MASK_SUPPLIER_PRICE on DIM_SUPPLIER_PART / FACT_PO_LINE.UNIT_PRICE_AMT and
+-- MASK_PENALTY_CLAUSE on DIM_CONTRACT.PENALTY_CLAUSE_TEXT; nothing else masked (FACT_GOODS_RECEIPT price feeds
+-- landed cost and stays clear, so Landed Cost Uplift % is the same for every persona).
+INSERT INTO SC.OPS._RESULTS
+WITH exp AS (SELECT COLUMN1 AS T, COLUMN2 AS C, COLUMN3 AS P FROM VALUES ('DIM_SUPPLIER_PART', 'UNIT_PRICE_AMT', 'MASK_SUPPLIER_PRICE'),
+               ('FACT_PO_LINE', 'UNIT_PRICE_AMT', 'MASK_SUPPLIER_PRICE'), ('DIM_CONTRACT', 'PENALTY_CLAUSE_TEXT', 'MASK_PENALTY_CLAUSE')),
+ref AS (SELECT REF_ENTITY_NAME, REF_COLUMN_NAME, POLICY_NAME, POLICY_STATUS FROM TABLE(SC.INFORMATION_SCHEMA.POLICY_REFERENCES(POLICY_NAME => 'SC.GOVERNANCE.MASK_SUPPLIER_PRICE'))
+        UNION ALL
+        SELECT REF_ENTITY_NAME, REF_COLUMN_NAME, POLICY_NAME, POLICY_STATUS FROM TABLE(SC.INFORMATION_SCHEMA.POLICY_REFERENCES(POLICY_NAME => 'SC.GOVERNANCE.MASK_PENALTY_CLAUSE')))
+SELECT 'H2_GOV_MASKING_POLICIES_ATTACHED',
+       IFF(COUNT_IF(r.REF_ENTITY_NAME IS NOT NULL AND r.POLICY_STATUS = 'ACTIVE') = 3 AND (SELECT COUNT(*) FROM ref) = 3, 'PASS', 'FAIL'),
+       COUNT_IF(r.REF_ENTITY_NAME IS NOT NULL) || '/3 masked columns (' || (SELECT COUNT(*) FROM ref) || ' references in total)'
+       || COALESCE('; missing: ' || NULLIF(LISTAGG(IFF(r.REF_ENTITY_NAME IS NULL, e.T || '.' || e.C, NULL), ', '), ''), '')
+FROM exp e LEFT JOIN ref r ON r.REF_ENTITY_NAME = e.T AND r.REF_COLUMN_NAME = e.C AND r.POLICY_NAME = e.P;
+
+-- unit prices are in no persona-reachable surface (not an SV dimension) and POLICY_CONTEXT does not simulate
+-- IS_ROLE_IN_SESSION, so MASK_SUPPLIER_PRICE is checked structurally: same allow-list condition as
+-- MASK_PENALTY_CLAUSE (whose effect per persona is proven functionally in H2_GOV_PENALTY_CLAUSE_MASKED_...),
+-- ELSE NULL, and SC_ADMIN still reads the prices.
+INSERT INTO SC.OPS._RESULTS
+WITH d AS (SELECT REGEXP_REPLACE(GET_DDL('POLICY', 'SC.GOVERNANCE.MASK_SUPPLIER_PRICE'), '\\s+', ' ') AS PR,
+                  REGEXP_REPLACE(GET_DDL('POLICY', 'SC.GOVERNANCE.MASK_PENALTY_CLAUSE'), '\\s+', ' ') AS PC),
+c AS (SELECT REGEXP_SUBSTR(PR, 'CASE WHEN (.*) THEN VAL ELSE (.*) END', 1, 1, 'ie', 1) AS PR_COND,
+             REGEXP_SUBSTR(PR, 'CASE WHEN (.*) THEN VAL ELSE (.*) END', 1, 1, 'ie', 2) AS PR_ELSE,
+             REGEXP_SUBSTR(PC, 'CASE WHEN (.*) THEN VAL ELSE (.*) END', 1, 1, 'ie', 1) AS PC_COND
+      FROM d),
+a AS (SELECT (SELECT COUNT(UNIT_PRICE_AMT) FROM SC.CONFORMED.DIM_SUPPLIER_PART) AS SP, (SELECT COUNT(UNIT_PRICE_AMT) FROM SC.CONFORMED.FACT_PO_LINE) AS PO)
+SELECT 'H2_GOV_SUPPLIER_PRICE_MASK_SAME_ALLOW_LIST',
+       IFF(c.PR_COND IS NOT NULL AND c.PR_COND = c.PC_COND AND TRIM(c.PR_ELSE) = 'NULL'
+           AND c.PR_COND ILIKE '%IS_ROLE_IN_SESSION(''SC_PROCUREMENT'')%' AND c.PR_COND NOT ILIKE '%SC_LOGISTICS%'
+           AND a.SP > 0 AND a.PO > 0, 'PASS', 'FAIL'),
+       'MASK_SUPPLIER_PRICE allow-list = MASK_PENALTY_CLAUSE: ' || IFF(c.PR_COND = c.PC_COND, 'yes', 'NO') || ' (' || COALESCE(c.PR_COND, 'not parsed')
+       || '), else ' || COALESCE(TRIM(c.PR_ELSE), '?') || '; SC_ADMIN reads ' || a.SP || ' DIM_SUPPLIER_PART / ' || a.PO || ' FACT_PO_LINE prices'
+FROM c, a;
+
+-- penalty clause (and the GR-price-based Landed Cost Uplift % DE01) through SV_SUPPLY_CHAIN per persona:
+-- ROLE|MASKED or MD5 of the Kronos clause|penalty per day|uplift DE01
+EXECUTE IMMEDIATE $$
+DECLARE out VARCHAR;
+BEGIN
+  WITH c AS (SELECT MAX(contract_penalty_clause) AS CL, MAX(contract_late_penalty_per_day) AS PD
+             FROM SEMANTIC_VIEW(SC.SEMANTIC.SV_SUPPLY_CHAIN DIMENSIONS contracts.contract_no, contracts.contract_penalty_clause,
+                                contracts.contract_late_penalty_per_day, suppliers.supplier_no WHERE suppliers.supplier_no = '1000011')),
+  l AS (SELECT MAX(landed_cost_uplift_pct) AS U FROM SEMANTIC_VIEW(SC.SEMANTIC.SV_SUPPLY_CHAIN DIMENSIONS plants.plant_code
+          METRICS goods_receipts.landed_cost_uplift_pct WHERE plants.plant_code = 'DE01'))
+  SELECT CURRENT_ROLE() || '|' || IFF(c.CL = '***MASKED***', 'MASKED', COALESCE(MD5(c.CL), 'null')) || '|'
+         || COALESCE(TO_VARCHAR(c.PD), 'null') || '|' || COALESCE(TO_VARCHAR(ROUND(l.U, 6)), 'null')
+    INTO :out FROM c, l;
+  RETURN out;
+EXCEPTION WHEN OTHER THEN RETURN 'ERROR|' || LEFT(SQLERRM, 200);
+END;
+$$;
+SET GOV_MASK_ADMIN = (SELECT LEFT($1, 250) FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())));
+SET GOV_CLAUSE_HEAD = (SELECT LEFT(MAX(PENALTY_CLAUSE_TEXT), 30) FROM SC.CONFORMED.DIM_CONTRACT WHERE SUPPLIER_NO = '1000011');
+SET GOV_CLAUSE_TAIL = (SELECT RIGHT(MAX(PENALTY_CLAUSE_TEXT), 30) FROM SC.CONFORMED.DIM_CONTRACT WHERE SUPPLIER_NO = '1000011');
+USE SECONDARY ROLES NONE;
+USE ROLE SC_PLANNER;
+EXECUTE IMMEDIATE $$
+DECLARE out VARCHAR;
+BEGIN
+  WITH c AS (SELECT MAX(contract_penalty_clause) AS CL, MAX(contract_late_penalty_per_day) AS PD
+             FROM SEMANTIC_VIEW(SC.SEMANTIC.SV_SUPPLY_CHAIN DIMENSIONS contracts.contract_no, contracts.contract_penalty_clause,
+                                contracts.contract_late_penalty_per_day, suppliers.supplier_no WHERE suppliers.supplier_no = '1000011')),
+  l AS (SELECT MAX(landed_cost_uplift_pct) AS U FROM SEMANTIC_VIEW(SC.SEMANTIC.SV_SUPPLY_CHAIN DIMENSIONS plants.plant_code
+          METRICS goods_receipts.landed_cost_uplift_pct WHERE plants.plant_code = 'DE01'))
+  SELECT CURRENT_ROLE() || '|' || IFF(c.CL = '***MASKED***', 'MASKED', COALESCE(MD5(c.CL), 'null')) || '|'
+         || COALESCE(TO_VARCHAR(c.PD), 'null') || '|' || COALESCE(TO_VARCHAR(ROUND(l.U, 6)), 'null')
+    INTO :out FROM c, l;
+  RETURN out;
+EXCEPTION WHEN OTHER THEN RETURN 'ERROR|' || LEFT(SQLERRM, 200);
+END;
+$$;
+SET GOV_MASK_PLANNER = (SELECT LEFT($1, 250) FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())));
+USE ROLE SC_PROCUREMENT;
+EXECUTE IMMEDIATE $$
+DECLARE out VARCHAR;
+BEGIN
+  WITH c AS (SELECT MAX(contract_penalty_clause) AS CL, MAX(contract_late_penalty_per_day) AS PD
+             FROM SEMANTIC_VIEW(SC.SEMANTIC.SV_SUPPLY_CHAIN DIMENSIONS contracts.contract_no, contracts.contract_penalty_clause,
+                                contracts.contract_late_penalty_per_day, suppliers.supplier_no WHERE suppliers.supplier_no = '1000011')),
+  l AS (SELECT MAX(landed_cost_uplift_pct) AS U FROM SEMANTIC_VIEW(SC.SEMANTIC.SV_SUPPLY_CHAIN DIMENSIONS plants.plant_code
+          METRICS goods_receipts.landed_cost_uplift_pct WHERE plants.plant_code = 'DE01'))
+  SELECT CURRENT_ROLE() || '|' || IFF(c.CL = '***MASKED***', 'MASKED', COALESCE(MD5(c.CL), 'null')) || '|'
+         || COALESCE(TO_VARCHAR(c.PD), 'null') || '|' || COALESCE(TO_VARCHAR(ROUND(l.U, 6)), 'null')
+    INTO :out FROM c, l;
+  RETURN out;
+EXCEPTION WHEN OTHER THEN RETURN 'ERROR|' || LEFT(SQLERRM, 200);
+END;
+$$;
+SET GOV_MASK_PROCUREMENT = (SELECT LEFT($1, 250) FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())));
+USE ROLE SC_LOGISTICS;
+EXECUTE IMMEDIATE $$
+DECLARE out VARCHAR;
+BEGIN
+  WITH c AS (SELECT MAX(contract_penalty_clause) AS CL, MAX(contract_late_penalty_per_day) AS PD
+             FROM SEMANTIC_VIEW(SC.SEMANTIC.SV_SUPPLY_CHAIN DIMENSIONS contracts.contract_no, contracts.contract_penalty_clause,
+                                contracts.contract_late_penalty_per_day, suppliers.supplier_no WHERE suppliers.supplier_no = '1000011')),
+  l AS (SELECT MAX(landed_cost_uplift_pct) AS U FROM SEMANTIC_VIEW(SC.SEMANTIC.SV_SUPPLY_CHAIN DIMENSIONS plants.plant_code
+          METRICS goods_receipts.landed_cost_uplift_pct WHERE plants.plant_code = 'DE01'))
+  SELECT CURRENT_ROLE() || '|' || IFF(c.CL = '***MASKED***', 'MASKED', COALESCE(MD5(c.CL), 'null')) || '|'
+         || COALESCE(TO_VARCHAR(c.PD), 'null') || '|' || COALESCE(TO_VARCHAR(ROUND(l.U, 6)), 'null')
+    INTO :out FROM c, l;
+  RETURN out;
+EXCEPTION WHEN OTHER THEN RETURN 'ERROR|' || LEFT(SQLERRM, 200);
+END;
+$$;
+SET GOV_MASK_LOGISTICS = (SELECT LEFT($1, 250) FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())));
+-- CSS_CONTRACTS as SC_LOGISTICS: hits|penalty sections|hits containing the Kronos clause
+EXECUTE IMMEDIATE $$
+DECLARE out VARCHAR;
+BEGIN
+  SELECT CURRENT_ROLE() || '|' || COUNT(*) || '|' || COUNT_IF(f.VALUE:SECTION_TITLE::VARCHAR ILIKE '%penalty%') || '|'
+         || COUNT_IF(CONTAINS(f.VALUE:CHUNK_TEXT::VARCHAR, $GOV_CLAUSE_HEAD) OR CONTAINS(f.VALUE:CHUNK_TEXT::VARCHAR, $GOV_CLAUSE_TAIL))
+    INTO :out
+  FROM TABLE(FLATTEN(PARSE_JSON(SNOWFLAKE.CORTEX.SEARCH_PREVIEW('SC.AGENTS.CSS_CONTRACTS',
+    '{"query": "late-delivery penalty credit per day late capped", "columns": ["SUPPLIER_NO", "SECTION_TITLE", "CHUNK_TEXT"], "filter": {"@eq": {"SUPPLIER_NO": "1000011"}}, "limit": 10}')):results)) f;
+  RETURN out;
+EXCEPTION WHEN OTHER THEN RETURN 'ERROR|' || LEFT(SQLERRM, 200);
+END;
+$$;
+SET GOV_CSS_LOGISTICS = (SELECT LEFT($1, 250) FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())));
+-- the agent as SC_LOGISTICS: ROLE|clause head in answer|clause tail in answer|access errors|SV returned ***MASKED***|answer start
+EXECUTE IMMEDIATE $$
+DECLARE out VARCHAR;
+BEGIN
+  WITH r AS (SELECT TRY_PARSE_JSON(SNOWFLAKE.CORTEX.DATA_AGENT_RUN('SC.AGENTS.AGT_SUPPLY_CHAIN',
+               '{"messages": [{"role": "user", "content": [{"type": "text", "text": "Quote the late-delivery penalty clause of the Kronos Castings contract."}]}]}')) AS R),
+  a AS (SELECT LISTAGG(IFF(c.VALUE:type = 'text', c.VALUE:text::VARCHAR, NULL), '') WITHIN GROUP (ORDER BY c.INDEX) AS TXT,
+               COUNT_IF(c.VALUE:type = 'tool_result' AND c.VALUE:tool_result:status::VARCHAR = 'error'
+                        AND REGEXP_LIKE(c.VALUE:tool_result:content::VARCHAR, '.*(insufficient privileges|not authorized|access denied|access control).*', 'is')) AS ERRS,
+               COUNT_IF(c.VALUE:type = 'tool_result' AND c.VALUE:tool_result:content::VARCHAR ILIKE '%***MASKED***%') AS MASKED
+        FROM r, LATERAL FLATTEN(INPUT => r.R:content, OUTER => TRUE) c)
+  SELECT CURRENT_ROLE() || '|' || IFF(CONTAINS(REGEXP_REPLACE(TXT, '\\s+', ' '), $GOV_CLAUSE_HEAD), 'LEAK', 'none') || '|'
+         || IFF(CONTAINS(REGEXP_REPLACE(TXT, '\\s+', ' '), $GOV_CLAUSE_TAIL), 'LEAK', 'none') || '|' || ERRS || '|' || IFF(MASKED > 0, 'MASKED', 'no') || '|'
+         || COALESCE(LEFT(REGEXP_REPLACE(TXT, '\\s+', ' '), 150), 'EMPTY')
+    INTO :out FROM a;
+  RETURN out;
+EXCEPTION WHEN OTHER THEN RETURN 'ERROR|' || LEFT(SQLERRM, 200);
+END;
+$$;
+SET GOV_AGENT_PENALTY = (SELECT LEFT($1, 250) FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())));
+USE ROLE SC_ADMIN;
+USE SECONDARY ROLES ALL;
+
+INSERT INTO SC.OPS._RESULTS
+WITH s AS (SELECT SPLIT_PART(COLUMN1, '|', 1) AS ROLE_NAME, COLUMN1 AS V, SPLIT_PART(COLUMN1, '|', 2) AS CL,
+                  SPLIT_PART(COLUMN1, '|', 3) AS PD, SPLIT_PART(COLUMN1, '|', 4) AS UPL
+           FROM VALUES ($GOV_MASK_PLANNER), ($GOV_MASK_PROCUREMENT), ($GOV_MASK_LOGISTICS)),
+a AS (SELECT SPLIT_PART($GOV_MASK_ADMIN, '|', 2) AS CL, SPLIT_PART($GOV_MASK_ADMIN, '|', 3) AS PD, SPLIT_PART($GOV_MASK_ADMIN, '|', 4) AS UPL)
+SELECT 'H2_GOV_PENALTY_CLAUSE_MASKED_THROUGH_SEMANTIC_VIEW',
+       IFF(COUNT(*) = 3 AND COUNT_IF(s.V LIKE 'ERROR|%') = 0 AND MAX(a.CL) NOT IN ('MASKED', 'null')
+           AND COUNT_IF(s.ROLE_NAME = 'SC_LOGISTICS' AND s.CL = 'MASKED') = 1
+           AND COUNT_IF(s.ROLE_NAME <> 'SC_LOGISTICS' AND s.CL = a.CL) = 2
+           AND COUNT_IF(s.PD = a.PD AND s.PD <> 'null') = 3 AND COUNT_IF(s.UPL = a.UPL AND s.UPL <> 'null') = 3, 'PASS', 'FAIL'),
+       'Kronos clause / penalty per day / Landed Cost Uplift % DE01: SC_ADMIN clear/' || MAX(a.PD) || '/' || MAX(a.UPL) || '; '
+       || LISTAGG(s.ROLE_NAME || ' ' || IFF(s.CL = 'MASKED', 'MASKED', IFF(s.CL = a.CL, 'clear', 'DIFFERENT ' || s.CL)) || '/' || s.PD || '/' || s.UPL
+                  || IFF(s.V LIKE 'ERROR|%', ' ' || s.V, ''), '; ') WITHIN GROUP (ORDER BY s.ROLE_NAME)
+FROM s, a;
+
+INSERT INTO SC.OPS._RESULTS
+SELECT 'H2_GOV_NO_PENALTY_TEXT_FOR_LOGISTICS_VIA_SEARCH_OR_AGENT',
+       IFF(SPLIT_PART($GOV_CSS_LOGISTICS, '|', 1) = 'SC_LOGISTICS' AND SPLIT_PART($GOV_CSS_LOGISTICS, '|', 2)::INT > 0
+           AND SPLIT_PART($GOV_CSS_LOGISTICS, '|', 3) = '0' AND SPLIT_PART($GOV_CSS_LOGISTICS, '|', 4) = '0'
+           AND SPLIT_PART($GOV_AGENT_PENALTY, '|', 1) = 'SC_LOGISTICS' AND SPLIT_PART($GOV_AGENT_PENALTY, '|', 2) = 'none'
+           AND SPLIT_PART($GOV_AGENT_PENALTY, '|', 3) = 'none' AND SPLIT_PART($GOV_AGENT_PENALTY, '|', 4) = '0'
+           AND SPLIT_PART($GOV_AGENT_PENALTY, '|', 5) = 'MASKED' AND SPLIT_PART($GOV_AGENT_PENALTY, '|', 6) NOT IN ('', 'EMPTY'), 'PASS', 'FAIL'),
+       'CSS_CONTRACTS as role|hits|penalty sections|hits with the Kronos clause: ' || $GOV_CSS_LOGISTICS
+       || '; agent "Quote the late-delivery penalty clause of the Kronos Castings contract." role|clause head|clause tail|access errors|SV returned ***MASKED***|answer: ' || $GOV_AGENT_PENALTY;
+
+-- H3. Certification tags (sql/00 creates SC.GOVERNANCE.METRIC_OWNER / CERTIFIED; sql/30 assigns them in the
+-- semantic-view DDL): the view and the canonical metrics CERTIFIED = TRUE with the contract owner
+-- (metric_contracts.md), Supplier Contractual OTD % / Gap = NAMED_VARIANT (not certified).
+INSERT INTO SC.OPS._RESULTS
+WITH exp (OBJ, OWNER, CERT) AS (SELECT * FROM VALUES
+  ('SV_SUPPLY_CHAIN', 'SC_ADMIN', 'TRUE'),
+  ('ORDER_LINES.CUSTOMER_OTD_PCT', 'SC_PLANNER', 'TRUE'),
+  ('ORDER_LINES.FILL_RATE_PCT', 'SC_PLANNER', 'TRUE'),
+  ('PURCHASE_ORDER_LINES.SUPPLIER_OTD_PCT', 'SC_PROCUREMENT', 'TRUE'),
+  ('INVENTORY.DAYS_OF_INVENTORY', 'SC_PLANNER', 'TRUE'),
+  ('GOODS_RECEIPTS.LANDED_COST_PER_UNIT', 'SC_PROCUREMENT', 'TRUE'),
+  ('GOODS_RECEIPTS.LANDED_COST_UPLIFT_PCT', 'SC_PROCUREMENT', 'TRUE'),
+  ('PURCHASE_ORDER_LINES.SUPPLIER_CONTRACTUAL_OTD_PCT', 'SC_PROCUREMENT', 'NAMED_VARIANT'),
+  ('PURCHASE_ORDER_LINES.SUPPLIER_CONTRACTUAL_OTD_GAP', 'SC_PROCUREMENT', 'NAMED_VARIANT')),
+ref AS (
+  SELECT 'SV_SUPPLY_CHAIN' AS OBJ, TAG_NAME, TAG_VALUE FROM TABLE(SC.INFORMATION_SCHEMA.TAG_REFERENCES('SC.SEMANTIC.SV_SUPPLY_CHAIN', 'TABLE'))
+  UNION ALL SELECT 'ORDER_LINES.CUSTOMER_OTD_PCT', TAG_NAME, TAG_VALUE FROM TABLE(SC.INFORMATION_SCHEMA.TAG_REFERENCES('SC.SEMANTIC.SV_SUPPLY_CHAIN!ORDER_LINES.CUSTOMER_OTD_PCT', 'SEMANTIC METRIC'))
+  UNION ALL SELECT 'ORDER_LINES.FILL_RATE_PCT', TAG_NAME, TAG_VALUE FROM TABLE(SC.INFORMATION_SCHEMA.TAG_REFERENCES('SC.SEMANTIC.SV_SUPPLY_CHAIN!ORDER_LINES.FILL_RATE_PCT', 'SEMANTIC METRIC'))
+  UNION ALL SELECT 'PURCHASE_ORDER_LINES.SUPPLIER_OTD_PCT', TAG_NAME, TAG_VALUE FROM TABLE(SC.INFORMATION_SCHEMA.TAG_REFERENCES('SC.SEMANTIC.SV_SUPPLY_CHAIN!PURCHASE_ORDER_LINES.SUPPLIER_OTD_PCT', 'SEMANTIC METRIC'))
+  UNION ALL SELECT 'INVENTORY.DAYS_OF_INVENTORY', TAG_NAME, TAG_VALUE FROM TABLE(SC.INFORMATION_SCHEMA.TAG_REFERENCES('SC.SEMANTIC.SV_SUPPLY_CHAIN!INVENTORY.DAYS_OF_INVENTORY', 'SEMANTIC METRIC'))
+  UNION ALL SELECT 'GOODS_RECEIPTS.LANDED_COST_PER_UNIT', TAG_NAME, TAG_VALUE FROM TABLE(SC.INFORMATION_SCHEMA.TAG_REFERENCES('SC.SEMANTIC.SV_SUPPLY_CHAIN!GOODS_RECEIPTS.LANDED_COST_PER_UNIT', 'SEMANTIC METRIC'))
+  UNION ALL SELECT 'GOODS_RECEIPTS.LANDED_COST_UPLIFT_PCT', TAG_NAME, TAG_VALUE FROM TABLE(SC.INFORMATION_SCHEMA.TAG_REFERENCES('SC.SEMANTIC.SV_SUPPLY_CHAIN!GOODS_RECEIPTS.LANDED_COST_UPLIFT_PCT', 'SEMANTIC METRIC'))
+  UNION ALL SELECT 'PURCHASE_ORDER_LINES.SUPPLIER_CONTRACTUAL_OTD_PCT', TAG_NAME, TAG_VALUE FROM TABLE(SC.INFORMATION_SCHEMA.TAG_REFERENCES('SC.SEMANTIC.SV_SUPPLY_CHAIN!PURCHASE_ORDER_LINES.SUPPLIER_CONTRACTUAL_OTD_PCT', 'SEMANTIC METRIC'))
+  UNION ALL SELECT 'PURCHASE_ORDER_LINES.SUPPLIER_CONTRACTUAL_OTD_GAP', TAG_NAME, TAG_VALUE FROM TABLE(SC.INFORMATION_SCHEMA.TAG_REFERENCES('SC.SEMANTIC.SV_SUPPLY_CHAIN!PURCHASE_ORDER_LINES.SUPPLIER_CONTRACTUAL_OTD_GAP', 'SEMANTIC METRIC'))),
+t AS (SELECT e.OBJ, e.OWNER, e.CERT,
+             MAX(IFF(r.TAG_NAME = 'METRIC_OWNER', r.TAG_VALUE, NULL)) AS GOT_OWNER, MAX(IFF(r.TAG_NAME = 'CERTIFIED', r.TAG_VALUE, NULL)) AS GOT_CERT
+      FROM exp e LEFT JOIN ref r ON r.OBJ = e.OBJ GROUP BY 1, 2, 3)
+SELECT 'H3_GOV_CERTIFICATION_TAGS',
+       IFF(COUNT(*) = 9 AND COUNT_IF(GOT_OWNER = OWNER AND GOT_CERT = CERT) = 9, 'PASS', 'FAIL'),
+       COUNT_IF(GOT_OWNER = OWNER AND GOT_CERT = CERT) || '/9 tagged as expected: '
+       || LISTAGG(SPLIT_PART(OBJ, '.', -1) || '=' || COALESCE(GOT_CERT, 'none') || '/' || COALESCE(GOT_OWNER, 'none')
+                  || IFF(GOT_OWNER = OWNER AND GOT_CERT = CERT, '', ' (expected ' || CERT || '/' || OWNER || ')'), ', ') WITHIN GROUP (ORDER BY OBJ)
+FROM t;
+
+-- H4. Grants (sql/00, sql/40, sql/50): persona roles hold an allow-list only -- USAGE on SC, SC_WH, schemas
+-- SEMANTIC and AGENTS, SELECT on SEMANTIC (and future AGENTS tables / views), USAGE on the agent, search service
+-- and action procedures in AGENTS, SNOWFLAKE.CORTEX_USER and the Snowflake Intelligence object; no role grants,
+-- nothing on RAW_*, CONFORMED, LEGACY, OPS or GOVERNANCE. PUBLIC holds nothing on SC or SC_WH.
+INSERT INTO SC.OPS._RESULTS
+WITH g AS (SELECT ROLE_NAME, PRIVILEGE, GRANTED_ON, REPLACE(NAME, '"', '') AS NAME FROM SC.OPS._PERSONA_GRANTS),
+c AS (SELECT g.*, (
+        (PRIVILEGE = 'USAGE' AND GRANTED_ON = 'DATABASE' AND NAME = 'SC')
+     OR (PRIVILEGE = 'USAGE' AND GRANTED_ON = 'WAREHOUSE' AND NAME = 'SC_WH')
+     OR (PRIVILEGE = 'USAGE' AND GRANTED_ON = 'SCHEMA' AND NAME IN ('SC.SEMANTIC', 'SC.AGENTS'))
+     OR (PRIVILEGE = 'SELECT' AND GRANTED_ON IN ('SEMANTIC_VIEW', 'TABLE', 'VIEW') AND STARTSWITH(NAME, 'SC.SEMANTIC.'))
+     OR (PRIVILEGE = 'SELECT' AND GRANTED_ON IN ('TABLE', 'VIEW') AND STARTSWITH(NAME, 'SC.AGENTS.'))
+     OR (PRIVILEGE = 'USAGE' AND GRANTED_ON IN ('CORTEX_AGENT', 'CORTEX_SEARCH_SERVICE', 'PROCEDURE') AND STARTSWITH(NAME, 'SC.AGENTS.'))
+     OR (PRIVILEGE = 'USAGE' AND GRANTED_ON = 'DATABASE_ROLE' AND NAME = 'SNOWFLAKE.CORTEX_USER')
+     OR (PRIVILEGE = 'USAGE' AND GRANTED_ON = 'SNOWFLAKE_INTELLIGENCE' AND NAME = 'SNOWFLAKE_INTELLIGENCE_OBJECT_DEFAULT')) AS ALLOWED
+      FROM g),
+req AS (SELECT r.ROLE_NAME,
+               COUNT_IF(c.PRIVILEGE = 'SELECT' AND c.GRANTED_ON = 'SEMANTIC_VIEW' AND c.NAME = 'SC.SEMANTIC.SV_SUPPLY_CHAIN') AS SV,
+               COUNT_IF(c.PRIVILEGE = 'USAGE' AND c.GRANTED_ON = 'CORTEX_AGENT' AND c.NAME = 'SC.AGENTS.AGT_SUPPLY_CHAIN') AS AGT,
+               COUNT_IF(c.PRIVILEGE = 'USAGE' AND c.GRANTED_ON = 'SCHEMA' AND c.NAME IN ('SC.SEMANTIC', 'SC.AGENTS')) AS SCH
+        FROM (SELECT COLUMN1 AS ROLE_NAME FROM VALUES ('SC_PLANNER'), ('SC_PROCUREMENT'), ('SC_LOGISTICS')) r
+        LEFT JOIN c ON c.ROLE_NAME = r.ROLE_NAME GROUP BY r.ROLE_NAME)
+SELECT 'H4_GOV_PERSONA_GRANTS_ALLOW_LIST_ONLY',
+       IFF((SELECT COUNT_IF(NOT ALLOWED) FROM c) = 0 AND (SELECT COUNT(*) FROM req WHERE SV = 1 AND AGT = 1 AND SCH = 2) = 3, 'PASS', 'FAIL'),
+       (SELECT COUNT(*) FROM c) || ' persona grants (direct + future), ' || (SELECT COUNT_IF(NOT ALLOWED) FROM c) || ' outside the allow-list'
+       || COALESCE(': ' || (SELECT NULLIF(LISTAGG(IFF(NOT ALLOWED, ROLE_NAME || ' ' || PRIVILEGE || ' ' || GRANTED_ON || ' ' || NAME, NULL), '; '), '') FROM c), '')
+       || '; SELECT on SV_SUPPLY_CHAIN + USAGE on AGT_SUPPLY_CHAIN + USAGE on SEMANTIC/AGENTS: '
+       || (SELECT LISTAGG(ROLE_NAME || ' ' || IFF(SV = 1 AND AGT = 1 AND SCH = 2, 'yes', 'NO'), ', ') WITHIN GROUP (ORDER BY ROLE_NAME) FROM req);
+
+SHOW GRANTS TO ROLE PUBLIC;
+INSERT INTO SC.OPS._RESULTS
+SELECT 'H4_GOV_PUBLIC_HAS_NOTHING_ON_SC', IFF(COUNT(*) = 0, 'PASS', 'FAIL'),
+       COUNT(*) || ' PUBLIC grants on SC / SC_WH' || COALESCE(': ' || NULLIF(LISTAGG("privilege" || ' ' || "name", '; '), ''), '')
+FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()))
+WHERE REGEXP_LIKE(REPLACE("name", '"', ''), '^SC(\\..*)?$') OR REPLACE("name", '"', '') = 'SC_WH';
+
+-- functional: each persona (secondary roles off) is denied one object in every restricted layer
+USE SECONDARY ROLES NONE;
+USE ROLE SC_PLANNER;
+EXECUTE IMMEDIATE $$
+DECLARE denied NUMBER := 0; readable VARCHAR := '';
+BEGIN
+  BEGIN SELECT COUNT(*) FROM SC.RAW_ERP.PLANTS; readable := readable || ' RAW_ERP.PLANTS'; EXCEPTION WHEN OTHER THEN denied := denied + 1; END;
+  BEGIN SELECT COUNT(*) FROM SC.CONFORMED.FACT_ORDER_LINE; readable := readable || ' CONFORMED.FACT_ORDER_LINE'; EXCEPTION WHEN OTHER THEN denied := denied + 1; END;
+  BEGIN SELECT COUNT(*) FROM SC.LEGACY.V_PLANNING_OTD_FILL; readable := readable || ' LEGACY.V_PLANNING_OTD_FILL'; EXCEPTION WHEN OTHER THEN denied := denied + 1; END;
+  BEGIN SELECT COUNT(*) FROM SC.OPS.TEST_RESULTS; readable := readable || ' OPS.TEST_RESULTS'; EXCEPTION WHEN OTHER THEN denied := denied + 1; END;
+  BEGIN SELECT COUNT(*) FROM SC.GOVERNANCE.GOV_ROLE_PLANT_ACCESS; readable := readable || ' GOVERNANCE.GOV_ROLE_PLANT_ACCESS'; EXCEPTION WHEN OTHER THEN denied := denied + 1; END;
+  RETURN CURRENT_ROLE() || '|' || denied || '|' || COALESCE(NULLIF(TRIM(readable), ''), 'none');
+END;
+$$;
+SET GOV_DENY_PLANNER = (SELECT LEFT($1, 250) FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())));
+USE ROLE SC_PROCUREMENT;
+EXECUTE IMMEDIATE $$
+DECLARE denied NUMBER := 0; readable VARCHAR := '';
+BEGIN
+  BEGIN SELECT COUNT(*) FROM SC.RAW_ERP.PLANTS; readable := readable || ' RAW_ERP.PLANTS'; EXCEPTION WHEN OTHER THEN denied := denied + 1; END;
+  BEGIN SELECT COUNT(*) FROM SC.CONFORMED.FACT_ORDER_LINE; readable := readable || ' CONFORMED.FACT_ORDER_LINE'; EXCEPTION WHEN OTHER THEN denied := denied + 1; END;
+  BEGIN SELECT COUNT(*) FROM SC.LEGACY.V_PLANNING_OTD_FILL; readable := readable || ' LEGACY.V_PLANNING_OTD_FILL'; EXCEPTION WHEN OTHER THEN denied := denied + 1; END;
+  BEGIN SELECT COUNT(*) FROM SC.OPS.TEST_RESULTS; readable := readable || ' OPS.TEST_RESULTS'; EXCEPTION WHEN OTHER THEN denied := denied + 1; END;
+  BEGIN SELECT COUNT(*) FROM SC.GOVERNANCE.GOV_ROLE_PLANT_ACCESS; readable := readable || ' GOVERNANCE.GOV_ROLE_PLANT_ACCESS'; EXCEPTION WHEN OTHER THEN denied := denied + 1; END;
+  RETURN CURRENT_ROLE() || '|' || denied || '|' || COALESCE(NULLIF(TRIM(readable), ''), 'none');
+END;
+$$;
+SET GOV_DENY_PROCUREMENT = (SELECT LEFT($1, 250) FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())));
+USE ROLE SC_LOGISTICS;
+EXECUTE IMMEDIATE $$
+DECLARE denied NUMBER := 0; readable VARCHAR := '';
+BEGIN
+  BEGIN SELECT COUNT(*) FROM SC.RAW_ERP.PLANTS; readable := readable || ' RAW_ERP.PLANTS'; EXCEPTION WHEN OTHER THEN denied := denied + 1; END;
+  BEGIN SELECT COUNT(*) FROM SC.CONFORMED.FACT_ORDER_LINE; readable := readable || ' CONFORMED.FACT_ORDER_LINE'; EXCEPTION WHEN OTHER THEN denied := denied + 1; END;
+  BEGIN SELECT COUNT(*) FROM SC.LEGACY.V_PLANNING_OTD_FILL; readable := readable || ' LEGACY.V_PLANNING_OTD_FILL'; EXCEPTION WHEN OTHER THEN denied := denied + 1; END;
+  BEGIN SELECT COUNT(*) FROM SC.OPS.TEST_RESULTS; readable := readable || ' OPS.TEST_RESULTS'; EXCEPTION WHEN OTHER THEN denied := denied + 1; END;
+  BEGIN SELECT COUNT(*) FROM SC.GOVERNANCE.GOV_ROLE_PLANT_ACCESS; readable := readable || ' GOVERNANCE.GOV_ROLE_PLANT_ACCESS'; EXCEPTION WHEN OTHER THEN denied := denied + 1; END;
+  RETURN CURRENT_ROLE() || '|' || denied || '|' || COALESCE(NULLIF(TRIM(readable), ''), 'none');
+END;
+$$;
+SET GOV_DENY_LOGISTICS = (SELECT LEFT($1, 250) FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())));
+USE ROLE SC_ADMIN;
+USE SECONDARY ROLES ALL;
+INSERT INTO SC.OPS._RESULTS
+SELECT 'H4_GOV_PERSONAS_DENIED_RESTRICTED_LAYERS',
+       IFF(COUNT_IF(SPLIT_PART(COLUMN1, '|', 2) = '5') = 3, 'PASS', 'FAIL'),
+       'role|denied of 5 (RAW_ERP, CONFORMED, LEGACY, OPS, GOVERNANCE)|readable: ' || LISTAGG(COLUMN1, '; ') WITHIN GROUP (ORDER BY COLUMN1)
+FROM VALUES ($GOV_DENY_PLANNER), ($GOV_DENY_PROCUREMENT), ($GOV_DENY_LOGISTICS);
+
+-- H5. Persona demo users (sql/50 item 5): TYPE PERSON, DEFAULT_ROLE = persona role, DEFAULT_WAREHOUSE SC_WH,
+-- no default secondary roles, enabled, and exactly one granted role (the persona). Users are account
+-- objects, so they are read as ACCOUNTADMIN. Passwords are set by hand and not asserted.
+CREATE OR REPLACE TEMPORARY TABLE SC.OPS._GOV_USERS (NAME VARCHAR, TYPE VARCHAR, DEFAULT_ROLE VARCHAR, DEFAULT_WAREHOUSE VARCHAR,
+  DEFAULT_SECONDARY_ROLES VARCHAR, DISABLED VARCHAR, HAS_PASSWORD VARCHAR, HAS_MFA VARCHAR);
+CREATE OR REPLACE TEMPORARY TABLE SC.OPS._GOV_USER_ROLES (USER_NAME VARCHAR, ROLE_NAME VARCHAR);
+USE ROLE ACCOUNTADMIN;
+SHOW USERS LIKE 'SC\\_DEMO\\_%';
+INSERT INTO SC.OPS._GOV_USERS SELECT "name", "type", "default_role", "default_warehouse", "default_secondary_roles", "disabled", "has_password", "has_mfa"
+FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+SHOW GRANTS TO USER SC_DEMO_PLANNER;
+INSERT INTO SC.OPS._GOV_USER_ROLES SELECT 'SC_DEMO_PLANNER', "role" FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+SHOW GRANTS TO USER SC_DEMO_PROCUREMENT;
+INSERT INTO SC.OPS._GOV_USER_ROLES SELECT 'SC_DEMO_PROCUREMENT', "role" FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+SHOW GRANTS TO USER SC_DEMO_LOGISTICS;
+INSERT INTO SC.OPS._GOV_USER_ROLES SELECT 'SC_DEMO_LOGISTICS', "role" FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+USE ROLE SC_ADMIN;
+INSERT INTO SC.OPS._RESULTS
+WITH e AS (SELECT COLUMN1 AS NAME, COLUMN2 AS ROLE_NAME FROM VALUES
+             ('SC_DEMO_PLANNER', 'SC_PLANNER'), ('SC_DEMO_PROCUREMENT', 'SC_PROCUREMENT'), ('SC_DEMO_LOGISTICS', 'SC_LOGISTICS')),
+r AS (SELECT USER_NAME, LISTAGG(ROLE_NAME, ',') WITHIN GROUP (ORDER BY ROLE_NAME) AS ROLES FROM SC.OPS._GOV_USER_ROLES GROUP BY 1),
+t AS (SELECT e.NAME, e.ROLE_NAME, u.TYPE, u.DEFAULT_ROLE, u.DEFAULT_WAREHOUSE, u.DEFAULT_SECONDARY_ROLES, u.DISABLED, u.HAS_PASSWORD, u.HAS_MFA, r.ROLES,
+             u.NAME IS NOT NULL AND u.TYPE = 'PERSON' AND u.DEFAULT_ROLE = e.ROLE_NAME AND u.DEFAULT_WAREHOUSE = 'SC_WH'
+             AND COALESCE(REPLACE(u.DEFAULT_SECONDARY_ROLES, ' ', ''), '[]') IN ('[]', '') AND u.DISABLED = 'false' AND r.ROLES = e.ROLE_NAME AS OK
+      FROM e LEFT JOIN SC.OPS._GOV_USERS u ON u.NAME = e.NAME LEFT JOIN r ON r.USER_NAME = e.NAME)
+SELECT 'H5_GOV_PERSONA_DEMO_USERS',
+       IFF(COUNT_IF(OK) = 3, 'PASS', 'FAIL'),
+       COUNT_IF(OK) || '/3 demo users as expected: '
+       || LISTAGG(NAME || ' ' || COALESCE(TYPE, 'MISSING') || ' role ' || COALESCE(DEFAULT_ROLE, '?') || ' wh ' || COALESCE(DEFAULT_WAREHOUSE, '?')
+                  || ' secondary ' || COALESCE(DEFAULT_SECONDARY_ROLES, '?') || ' granted ' || COALESCE(ROLES, 'none')
+                  || ' password ' || IFF(HAS_PASSWORD = 'true', 'set', 'not set') || ' mfa ' || IFF(HAS_MFA = 'true', 'enrolled', 'not enrolled'), '; ')
+          WITHIN GROUP (ORDER BY NAME)
+FROM t;
 
 -- E. Layers not built yet
 INSERT INTO SC.OPS._RESULTS

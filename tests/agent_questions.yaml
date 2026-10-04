@@ -54,10 +54,11 @@ questions:
         METRICS purchase_order_lines.supplier_contractual_otd_pct, purchase_order_lines.contracted_delivery_target,
                 purchase_order_lines.contractual_pro_forma_po_lines
         WHERE dates.calendar_month_offset = -1 AND suppliers.supplier_no = '1000011')
-      -- penalty terms and contract no.: contracts.contract_no, contract_late_penalty_per_day, contract_late_penalty_cap
+      -- penalty terms, clause text and contract no.: contracts.contract_no, contract_penalty_clause,
+      --   contract_late_penalty_per_day, contract_late_penalty_cap (clause masked for SC_LOGISTICS, sql/50)
     answer_must_contain: [Kronos contractual OTD %, contracted target %, calendar_month_label, "calendar month", "pro-forma",
                           contract_no, penalty % per day, penalty cap %]
-    tools_must_include: [contract_search filtered on SUPPLIER_NO 1000011]
+    tools_must_include: [supply_chain_metrics]   # contract_search holds no penalty sections since sql/50 item 2 (optional here)
     expected_today: "Sep 2026 calendar month; Kronos 14.3% vs 96.0%; pro-forma (effective 2026-10-03);
                      CTR-S0011-2026 '2. Late-Delivery Penalty': 1.0% per day late, cap 8%, 1 grace day"
 

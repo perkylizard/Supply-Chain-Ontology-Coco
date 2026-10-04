@@ -516,6 +516,17 @@ tables:
                        SUM(IFF(goods_receipts.is_landed_cost_population, goods_receipts.receipt_landed_cost_amt, NULL))
                        / NULLIF(SUM(IFF(goods_receipts.is_landed_cost_population, goods_receipts.receipt_qty, NULL)), 0),
                        NULL)::NUMBER(18,4)
+        tags:
+          - name:
+              database: SC
+              schema: GOVERNANCE
+              tag: METRIC_OWNER
+            value: SC_PROCUREMENT
+          - name:
+              database: SC
+              schema: GOVERNANCE
+              tag: CERTIFIED
+            value: "TRUE"
         access_modifier: public_access
         using_relationships:
           - GOODS_RECEIPT_TO_POSTING_DATE
@@ -542,6 +553,17 @@ tables:
         expr: |-
           (SUM(IFF(goods_receipts.is_landed_cost_population, goods_receipts.receipt_landed_cost_amt, NULL))
                     / NULLIF(SUM(IFF(goods_receipts.is_landed_cost_population, goods_receipts.receipt_product_cost_amt, NULL)), 0) - 1)::NUMBER(9,6)
+        tags:
+          - name:
+              database: SC
+              schema: GOVERNANCE
+              tag: METRIC_OWNER
+            value: SC_PROCUREMENT
+          - name:
+              database: SC
+              schema: GOVERNANCE
+              tag: CERTIFIED
+            value: "TRUE"
         access_modifier: public_access
         using_relationships:
           - GOODS_RECEIPT_TO_POSTING_DATE
@@ -672,6 +694,17 @@ tables:
         expr: |-
           (SUM(IFF(inventory.is_doi_population, inventory.usable_qty * parts.standard_cost_amt, NULL))
                     / NULLIF(SUM(IFF(inventory.is_doi_population, inventory.daily_demand_qty * parts.standard_cost_amt, NULL)), 0))::NUMBER(18,6)
+        tags:
+          - name:
+              database: SC
+              schema: GOVERNANCE
+              tag: METRIC_OWNER
+            value: SC_PLANNER
+          - name:
+              database: SC
+              schema: GOVERNANCE
+              tag: CERTIFIED
+            value: "TRUE"
         access_modifier: public_access
         non_additive_dimensions:
           - table: INVENTORY
@@ -897,6 +930,17 @@ tables:
           - line-level OTIF
         description: "Customer OTD % (contract v1.2 §2): share of due customer order lines that arrived complete within [commit - 1 day, commit] of the first commit date. = ON_TIME_LINES / DUE_LINES, 0-1 fraction, NULL when no due lines. Default meaning of unqualified on-time delivery / OTD. Partial = late, so this is line-level OTIF. Publish with OUTBOUND_ARRIVAL_EVIDENCE_COVERAGE_PCT."
         expr: "(COUNT_IF(order_lines.is_on_time_line) / NULLIF(COUNT_IF(order_lines.is_due_line), 0))::NUMBER(9,6)"
+        tags:
+          - name:
+              database: SC
+              schema: GOVERNANCE
+              tag: METRIC_OWNER
+            value: SC_PLANNER
+          - name:
+              database: SC
+              schema: GOVERNANCE
+              tag: CERTIFIED
+            value: "TRUE"
         access_modifier: public_access
       - name: DUE_LINES
         description: "Customer OTD % denominator: order lines in population with commit date in the period and <= as-of date, including open lines."
@@ -925,6 +969,17 @@ tables:
         expr: |-
           (SUM(IFF(order_lines.is_due_line, order_lines.line_filled_qty, NULL))
                     / NULLIF(SUM(IFF(order_lines.is_due_line, order_lines.line_required_qty, NULL)), 0))::NUMBER(9,6)
+        tags:
+          - name:
+              database: SC
+              schema: GOVERNANCE
+              tag: METRIC_OWNER
+            value: SC_PLANNER
+          - name:
+              database: SC
+              schema: GOVERNANCE
+              tag: CERTIFIED
+            value: "TRUE"
         access_modifier: public_access
       - name: FILL_RATE_REQUIRED_QTY
         description: "Fill Rate % denominator: sum of required qty (ordered - customer-cancelled) over due lines, base UoM."
@@ -1341,6 +1396,17 @@ tables:
           IFF(COUNT(DISTINCT IFF(purchase_order_lines.is_contractual_due_po_line, purchase_order_lines.CONTRACT_NO, NULL)) = 1,
                        COUNT_IF(purchase_order_lines.is_contractual_on_time_po_line) / NULLIF(COUNT_IF(purchase_order_lines.is_contractual_due_po_line), 0)
                        - MAX(IFF(purchase_order_lines.is_contractual_due_po_line, purchase_order_lines.CONTRACT_DELIVERY_TARGET_FRACTION, NULL)), NULL)::NUMBER(9,6)
+        tags:
+          - name:
+              database: SC
+              schema: GOVERNANCE
+              tag: METRIC_OWNER
+            value: SC_PROCUREMENT
+          - name:
+              database: SC
+              schema: GOVERNANCE
+              tag: CERTIFIED
+            value: NAMED_VARIANT
         access_modifier: public_access
         using_relationships:
           - PO_LINE_TO_LATEST_CONFIRMED_DATE
@@ -1353,6 +1419,17 @@ tables:
           - on-time vs contract
         description: "Supplier Contractual OTD % (contract v1.4 §3.1, a named variant, NOT canonical): share of contracted-supplier PO lines whose full qty arrived on or before the latest confirmed date + the contract grace days (early = on time). = CONTRACTUAL_ON_TIME_PO_LINES / CONTRACTUAL_DUE_PO_LINES, 0-1 fraction, NULL when empty. Calendar months on the latest confirmed date. Only for \"contractual OTD\", \"OTD vs contract\" or \"below contracted target\" questions; never for plain OTD or supplier OTD."
         expr: "(COUNT_IF(purchase_order_lines.is_contractual_on_time_po_line) / NULLIF(COUNT_IF(purchase_order_lines.is_contractual_due_po_line), 0))::NUMBER(9,6)"
+        tags:
+          - name:
+              database: SC
+              schema: GOVERNANCE
+              tag: METRIC_OWNER
+            value: SC_PROCUREMENT
+          - name:
+              database: SC
+              schema: GOVERNANCE
+              tag: CERTIFIED
+            value: NAMED_VARIANT
         access_modifier: public_access
         using_relationships:
           - PO_LINE_TO_LATEST_CONFIRMED_DATE
@@ -1383,6 +1460,17 @@ tables:
           - supplier line-level OTIF
         description: "Supplier OTD % (contract v1.2 §3): share of due PO lines that arrived complete at the receiving plant within [commit - 1 day, commit] of the first supplier confirmation. = ON_TIME_PO_LINES / DUE_PO_LINES, 0-1 fraction, NULL when empty. Arrival per ASN = IoT geofence entry, then carrier POD, else GR posting date (GR_FALLBACK, lower confidence: GR lags arrival by 0-5 days and can understate OTD). Only for explicit supplier / vendor / inbound questions. Publish with SUPPLIER_OTD_EVIDENCE_COVERAGE_PCT and SUPPLIER_OTD_GR_FALLBACK_PCT."
         expr: "(COUNT_IF(purchase_order_lines.is_on_time_po_line) / NULLIF(COUNT_IF(purchase_order_lines.is_due_po_line), 0))::NUMBER(9,6)"
+        tags:
+          - name:
+              database: SC
+              schema: GOVERNANCE
+              tag: METRIC_OWNER
+            value: SC_PROCUREMENT
+          - name:
+              database: SC
+              schema: GOVERNANCE
+              tag: CERTIFIED
+            value: "TRUE"
         access_modifier: public_access
         using_relationships:
           - PO_LINE_TO_COMMIT_DATE
@@ -1670,6 +1758,17 @@ relationships:
     relationship_columns:
       - left_column: CONTRACT_NO
         right_column: CONTRACT_NO
+tags:
+  - name:
+      database: SC
+      schema: GOVERNANCE
+      tag: METRIC_OWNER
+    value: SC_ADMIN
+  - name:
+      database: SC
+      schema: GOVERNANCE
+      tag: CERTIFIED
+    value: "TRUE"
 module_custom_instructions:
   sql_generation: |-
     Metric contract: docs/metric_contracts.md v1.4. Canonical metrics: CUSTOMER_OTD_PCT, SUPPLIER_OTD_PCT, FILL_RATE_PCT, DAYS_OF_INVENTORY, LANDED_COST_PER_UNIT, LANDED_COST_UPLIFT_PCT. Named variant (not canonical): SUPPLIER_CONTRACTUAL_OTD_PCT with SUPPLIER_CONTRACTUAL_OTD_GAP (rule 12).

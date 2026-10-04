@@ -8,7 +8,9 @@
 --   supply_chain_metrics  Cortex Analyst on SC.SEMANTIC.SV_SUPPLY_CHAIN: the ONLY
 --                         source of numbers (AGENTS.md hard rule 1).
 --   contract_search       Cortex Search SC.AGENTS.CSS_CONTRACTS (sql/40_agents_contracts.sql):
---                         contract wording only, filterable by SUPPLIER_NO / CONTRACT_NO.
+--                         contract wording only, filterable by SUPPLIER_NO / CONTRACT_NO. No
+--                         penalty sections (sql/50 item 2): the penalty clause comes from the
+--                         semantic view, where it is masked for SC_LOGISTICS.
 --   expedite_po           SC.AGENTS.EXPEDITE_PO(po_no, po_line, reason)
 --   flag_supplier         SC.AGENTS.FLAG_SUPPLIER(supplier_no, reason, evidence)
 --                         Custom tools: no external calls, only an audited request
@@ -16,6 +18,15 @@
 --                         are validated through SEMANTIC_VIEW() dimensions (no FACT_ /
 --                         DIM_ reads). EXECUTE AS OWNER (SC_ADMIN), so personas get
 --                         USAGE on the procedures and nothing on OPS.
+--                         Plant access: inside an owner's-rights procedure the row
+--                         access policy sees the owner, so both procedures check the
+--                         CALLER's session roles (SYS_CONTEXT SNOWFLAKE$SESSION
+--                         IS_ROLE_ACTIVATED; needs READ SESSION, sql/00) against
+--                         SC.GOVERNANCE.GOV_ROLE_PLANT_ACCESS, the mapping of
+--                         RAP_PLANT_ACCESS (sql/50). Not visible -> REJECTED with
+--                         reason_code PLANT_NOT_VISIBLE, nothing written, no plant /
+--                         supplier details returned. Fails closed if the role
+--                         context is unreadable.
 --
 -- OPS naming: ALERT_* (AGENTS.md naming table). Each row is a request a buyer or
 -- supplier manager must act on, i.e. an alert raised through the agent.
@@ -67,6 +78,9 @@ DECLARE
   v_supp_name VARCHAR;
   v_plant     VARCHAR;
   v_open      BOOLEAN;
+  v_visible   NUMBER := 0;
+  v_role      VARCHAR;
+  v_act       BOOLEAN;
   v_id        VARCHAR;
 BEGIN
   IF (LENGTH(v_reason) < 5) THEN
@@ -86,6 +100,21 @@ BEGIN
 
   IF (v_n = 0) THEN
     RETURN OBJECT_CONSTRUCT('status', 'REJECTED', 'error', 'PO line ' || v_po || ' / ' || v_line || ' does not exist. Nothing was written.');
+  END IF;
+
+  -- caller's plant access (same mapping as RAP_PLANT_ACCESS), evaluated on the caller's session roles:
+  -- the roles mapped to the line's plant, each tested with IS_ROLE_ACTIVATED (role must be a bound constant)
+  LET rs RESULTSET := (SELECT DISTINCT ROLE_NAME FROM SC.GOVERNANCE.GOV_ROLE_PLANT_ACCESS
+                       WHERE PLANT_CODE = '*' OR PLANT_CODE = :v_plant);
+  LET c CURSOR FOR rs;
+  FOR r IN c DO
+    v_role := r.ROLE_NAME;
+    SELECT COALESCE(SYS_CONTEXT('SNOWFLAKE$SESSION', 'IS_ROLE_ACTIVATED', :v_role)::BOOLEAN, FALSE) INTO :v_act;
+    IF (v_act) THEN v_visible := v_visible + 1; END IF;
+  END FOR;
+  IF (v_visible = 0) THEN
+    RETURN OBJECT_CONSTRUCT('status', 'REJECTED', 'reason_code', 'PLANT_NOT_VISIBLE',
+                            'error', 'PO line ' || v_po || ' / ' || v_line || ' is at a plant your role is not allowed to see, so it cannot be expedited through this tool. Nothing was written.');
   END IF;
 
   v_id := 'EXP-' || TO_CHAR(CONVERT_TIMEZONE('UTC', CURRENT_TIMESTAMP()), 'YYYYMMDD') || '-' || UPPER(LEFT(REPLACE(UUID_STRING(), '-', ''), 6));
@@ -121,6 +150,9 @@ DECLARE
   v_n         NUMBER;
   v_supp_no   VARCHAR;
   v_supp_name VARCHAR;
+  v_visible   NUMBER := 0;
+  v_role      VARCHAR;
+  v_act       BOOLEAN;
   v_id        VARCHAR;
 BEGIN
   IF (LENGTH(v_reason) < 5) THEN
@@ -140,6 +172,26 @@ BEGIN
   END IF;
   IF (v_n > 1) THEN
     RETURN OBJECT_CONSTRUCT('status', 'REJECTED', 'error', 'Supplier ' || v_key || ' is ambiguous (' || v_n || ' matches); pass the ERP vendor number. Nothing was written.');
+  END IF;
+
+  -- caller's plant access: the supplier must deliver (PO lines) to at least one plant the caller may see,
+  -- same mapping as RAP_PLANT_ACCESS, evaluated on the caller's session roles
+  LET rs RESULTSET := (
+    SELECT DISTINCT m.ROLE_NAME
+    FROM (SELECT DISTINCT plant_code
+          FROM SEMANTIC_VIEW(SC.SEMANTIC.SV_SUPPLY_CHAIN
+                 DIMENSIONS purchase_order_lines.po_no, suppliers.supplier_no, plants.plant_code)
+          WHERE supplier_no = :v_supp_no) sp
+    JOIN SC.GOVERNANCE.GOV_ROLE_PLANT_ACCESS m ON m.PLANT_CODE = '*' OR m.PLANT_CODE = sp.plant_code);
+  LET c CURSOR FOR rs;
+  FOR r IN c DO
+    v_role := r.ROLE_NAME;
+    SELECT COALESCE(SYS_CONTEXT('SNOWFLAKE$SESSION', 'IS_ROLE_ACTIVATED', :v_role)::BOOLEAN, FALSE) INTO :v_act;
+    IF (v_act) THEN v_visible := v_visible + 1; END IF;
+  END FOR;
+  IF (v_visible = 0) THEN
+    RETURN OBJECT_CONSTRUCT('status', 'REJECTED', 'reason_code', 'PLANT_NOT_VISIBLE',
+                            'error', 'Supplier ' || v_key || ' delivers only to plants your role is not allowed to see, so it cannot be flagged through this tool. Nothing was written.');
   END IF;
 
   v_id := 'FLG-' || TO_CHAR(CONVERT_TIMEZONE('UTC', CURRENT_TIMESTAMP()), 'YYYYMMDD') || '-' || UPPER(LEFT(REPLACE(UUID_STRING(), '-', ''), 6));
@@ -226,12 +278,15 @@ instructions:
     the data range (first and last date covered); for contractual OTD also the contracted target, gap, pro-forma PO lines
     and contract effective date.
 
-    5. CONTRACTS. Use contract_search for contract wording (penalty clauses, grace days, delivery-target wording, lead
-    time, Incoterm, payment terms, validity). When a supplier is named, filter SUPPLIER_NO to its 7-digit ERP vendor
-    number (from supply_chain_metrics; Kronos Castings = 1000011, Vela Polymers = 1000022). For "below contracted target"
-    questions: first get Supplier Contractual OTD % and Gap per supplier from supply_chain_metrics; then for each supplier
-    the user names (if none is named but penalties are asked, the worst three below target) search "late-delivery
-    penalty" filtered by its SUPPLIER_NO and quote the clause verbatim with its CONTRACT_NO.
+    5. CONTRACTS. Use contract_search for contract wording (grace days, delivery-target wording, lead time, Incoterm,
+    payment terms, validity). When a supplier is named, filter SUPPLIER_NO to its 7-digit ERP vendor number (from
+    supply_chain_metrics; Kronos Castings = 1000011, Vela Polymers = 1000022). Penalty clauses are NOT in
+    contract_search: get the penalty clause, penalty per day, penalty cap and grace days with the contract number from
+    supply_chain_metrics. For "below contracted target" questions: first get Supplier Contractual OTD % and Gap per
+    supplier from supply_chain_metrics; then for each supplier the user names (if none is named but penalties are
+    asked, the worst three below target) get its penalty terms from supply_chain_metrics and quote the clause verbatim
+    with its CONTRACT_NO. If the clause text comes back as ***MASKED*** or empty, say the clause wording is restricted,
+    never reconstruct or paraphrase it, and give only the penalty per day, cap and grace days.
 
     6. ACTIONS (expedite_po, flag_supplier). They write an audited request (user, UTC timestamp, reason, evidence) to
     SC.OPS.ALERT_AGENT_ACTIONS; no external system is called. Two steps, no exceptions:
@@ -277,7 +332,8 @@ tools:
         The ONLY source of numbers. Cortex Analyst over the semantic view SC.SEMANTIC.SV_SUPPLY_CHAIN, which implements
         the binding metric contracts (metric_contracts.md v1.4): Customer OTD %, Supplier OTD %, Fill Rate %,
         Days of Inventory, Landed Cost per Unit, Landed Cost Uplift %, and the named, non-canonical variant
-        Supplier Contractual OTD % / Gap; plus contract terms (delivery target, grace days, penalty rates, validity),
+        Supplier Contractual OTD % / Gap; plus contract terms (delivery target, grace days, penalty rates, penalty clause
+        text, validity),
         supplier / plant / part / PO-line lookups, period labels and data ranges. Use for every value, count, date range,
         supplier number lookup or existence check. Pass the user's question in their own words plus the scope
         (plant, supplier, period); never ask it for a metric the contracts do not define.
@@ -285,8 +341,9 @@ tools:
       type: cortex_search
       name: contract_search
       description: >-
-        Searches the signed supplier contract PDFs (one chunk per contract section) for wording: late-delivery penalty
-        clauses, grace days, delivery-performance target wording, lead time, Incoterm, payment terms, validity.
+        Searches the signed supplier contract PDFs (one chunk per contract section) for wording: grace days,
+        delivery-performance target wording, lead time, Incoterm, payment terms, validity. Late-delivery penalty
+        sections are not indexed (penalty terms come from supply_chain_metrics).
         Filter by SUPPLIER_NO (7-digit ERP vendor number, e.g. 1000011 = Kronos Castings) whenever a supplier is named,
         or by CONTRACT_NO (e.g. CTR-S0011-2026). Text only: never take metric values (OTD, fill rate, DOI, cost) from it.
   - tool_spec:
@@ -294,8 +351,9 @@ tools:
       name: expedite_po
       description: >-
         Writes an audited expedite request for ONE purchase order line to SC.OPS.ALERT_AGENT_ACTIONS (user, timestamp,
-        reason) and returns a confirmation_id. No external system is called. Validates that the PO line exists; returns
-        status REJECTED otherwise. Call ONLY after the user has explicitly confirmed the exact request in their latest message.
+        reason) and returns a confirmation_id. No external system is called. Validates that the PO line exists and is at a
+        plant the user may see; returns status REJECTED otherwise (reason_code PLANT_NOT_VISIBLE: say the PO line is outside
+        the user's plant access and nothing was written). Call ONLY after the user has explicitly confirmed the exact request in their latest message.
       input_schema:
         type: object
         properties:
@@ -314,8 +372,8 @@ tools:
       name: flag_supplier
       description: >-
         Writes an audited supplier-performance flag to SC.OPS.ALERT_AGENT_ACTIONS (user, timestamp, reason, evidence)
-        and returns a confirmation_id. No external system is called. Validates that the supplier exists; returns status
-        REJECTED otherwise. Call ONLY after the user has explicitly confirmed the exact request in their latest message.
+        and returns a confirmation_id. No external system is called. Validates that the supplier exists and delivers to a
+        plant the user may see; returns status REJECTED otherwise (reason_code PLANT_NOT_VISIBLE). Call ONLY after the user has explicitly confirmed the exact request in their latest message.
       input_schema:
         type: object
         properties:

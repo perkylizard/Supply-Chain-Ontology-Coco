@@ -420,6 +420,10 @@ LEFT JOIN sp ON sp.SUPPLIER_ID = s.SUPPLIER_ID;
 --   available on FULL-refresh DTs). Keys therefore come from the incremental
 --   DT_CONTRACT_TERMS with the same supplier-id resolution as DIM_CONTRACT
 --   (DIM_CONTRACT itself is FULL); the tests assert both agree.
+--   Penalty sections are NOT indexed (sql/50_governance.sql item 2, decided
+--   2026-10-04): Cortex Search serves with owner's rights and cannot mask per
+--   caller, so the clause wording reaches users only through the masked
+--   DIM_CONTRACT.PENALTY_CLAUSE_TEXT (SV dimension contracts.contract_penalty_clause).
 -- -----------------------------------------------------------------------------
 CREATE OR REPLACE DYNAMIC TABLE SC.CONFORMED.DT_CONTRACT_CHUNK (
   CHUNK_ID        COMMENT 'Chunk key: <DOC_FILE_PATH>#p<PAGE_INDEX>#c<CHUNK_SEQ>.',
@@ -434,7 +438,7 @@ CREATE OR REPLACE DYNAMIC TABLE SC.CONFORMED.DT_CONTRACT_CHUNK (
   CHUNK_TEXT      COMMENT 'Searchable text: document title, contract number and section heading, then the section text.'
 )
   TARGET_LAG = '1 hour' WAREHOUSE = SC_WH REFRESH_MODE = INCREMENTAL
-  COMMENT = 'Intermediate: contract PDF text chunked by section for Cortex Search, with file path, contract and supplier keys per chunk. One row per CHUNK_ID.'
+  COMMENT = 'Intermediate: contract PDF text chunked by section for Cortex Search, with file path, contract and supplier keys per chunk. Penalty sections excluded (wording only via the masked DIM_CONTRACT.PENALTY_CLAUSE_TEXT). One row per CHUNK_ID.'
 AS
 SELECT p.RELATIVE_PATH || '#p' || p.PAGE_INDEX || '#c' || ch.INDEX,
        p.RELATIVE_PATH, p.FILE_NAME, p.PAGE_INDEX, ch.INDEX,
@@ -447,7 +451,8 @@ FROM SC.RAW_DOCS.CONTRACT_PAGES p
 JOIN SC.CONFORMED.DT_CONTRACT_TERMS t ON t.DOC_FILE_PATH = p.RELATIVE_PATH AND t.DOC_FILE_MD5 = p.FILE_MD5
 LEFT JOIN SC.RAW_SUPPLIER.SUPPLIERS s ON s.SUPPLIER_ID = t.DOC_SUPPLIER_PORTAL_ID,
 LATERAL FLATTEN(INPUT => SNOWFLAKE.CORTEX.SPLIT_TEXT_MARKDOWN_HEADER(
-         p.PAGE_TEXT, OBJECT_CONSTRUCT('#', 'doc_title', '##', 'section'), 1000, 0)) ch;
+         p.PAGE_TEXT, OBJECT_CONSTRUCT('#', 'doc_title', '##', 'section'), 1000, 0)) ch
+WHERE COALESCE(ch.VALUE:headers:section::VARCHAR, '') NOT ILIKE '%penalty%';
 
 -- -----------------------------------------------------------------------------
 -- DT_SUPPLIER_PART_XWALK: supplier part number -> ERP PART_NO
