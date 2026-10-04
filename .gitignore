@@ -1,0 +1,52 @@
+# OS junk
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.snowflake/
+
+# Secrets and environment
+.env
+*.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p8
+*.p12
+*.pfx
+secrets/
+secrets.*
+*secret*
+*credentials*
+connections.toml
+config.toml
+profiles.yml
+
+# Local outputs / scratch
+tmp_*
+*.log
+*.tmp
+out/
+output/
+outputs/
+logs/
+target/
+dbt_packages/
+.ipynb_checkpoints/
+__pycache__/
+*.pyc
+.venv/
+venv/
+Untitled*

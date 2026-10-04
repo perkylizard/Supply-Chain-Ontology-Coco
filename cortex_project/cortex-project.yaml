@@ -1,0 +1,7 @@
+version: 1
+artifacts:
+  - path: SV_SUPPLY_CHAIN.sv.yaml
+    type: semantic_view
+    targets:
+      default:
+        object: SC.SEMANTIC.SV_SUPPLY_CHAIN

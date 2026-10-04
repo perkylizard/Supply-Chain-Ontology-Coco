@@ -1,0 +1,100 @@
+-- =============================================================================
+-- 60_ops_dq_contracts.sql
+-- SC.OPS.DQ_CONTRACT_TERMS_RECON: governance finding "signed PDF vs supplier
+-- system". One row per contract x term. The PDF (CONFORMED.DIM_CONTRACT) is the
+-- legal source; the supplier-system side is RAW_SUPPLIER as delivered. Neither
+-- side is overwritten: mismatches are reported here and as DIM_CONTRACT.DQ_FLAGS.
+-- RAW_SUPPLIER has no CONTRACT_TERMS table, so each term is compared with the
+-- field the supplier system does hold:
+--   PAYMENT_TERMS, CURRENCY, SUPPLIER_NAME  -> SUPPLIERS (1 value per supplier)
+--   INCOTERM                                -> PURCHASE_ORDERS.INCOTERM (per PO line)
+--   LEAD_TIME_DAYS                          -> SUPPLIER_PARTS.LEAD_TIME_DAYS (per part quote)
+--   DELIVERY_TARGET, LATE_PENALTY, VALIDITY -> no supplier-system field (PDF_ONLY)
+-- OPS is a side path (architecture.md §1): read by SC_ADMIN, never by personas,
+-- agents or apps. Depends on: sql/20_conformed.sql (DIM_CONTRACT). Idempotent.
+-- =============================================================================
+
+USE ROLE SC_ADMIN;
+USE WAREHOUSE SC_WH;
+USE SCHEMA SC.OPS;
+
+CREATE OR REPLACE VIEW SC.OPS.DQ_CONTRACT_TERMS_RECON (
+  CONTRACT_NO           COMMENT 'Contract (DIM_CONTRACT).',
+  SUPPLIER_NO           COMMENT 'Supplier counterparty (ERP vendor number).',
+  SUPPLIER_PORTAL_ID    COMMENT 'Supplier-portal id printed on the PDF.',
+  TERM                  COMMENT 'Contract term compared.',
+  PDF_VALUE             COMMENT 'Value on the signed PDF (legal source).',
+  SUPPLIER_SYSTEM_VALUE COMMENT 'Value(s) in the supplier system; for per-line sources the distinct values with row counts.',
+  SUPPLIER_SYSTEM_FIELD COMMENT 'RAW_SUPPLIER field compared with.',
+  ROWS_COMPARED         COMMENT 'Supplier-system rows compared (1 for supplier-master fields).',
+  ROWS_DIFFERING        COMMENT 'Supplier-system rows whose value differs from the PDF.',
+  ROWS_DIFFERING_IN_VALIDITY COMMENT 'Differing PO lines ordered on or after the contract VALID_FROM (INCOTERM only; NULL otherwise).',
+  STATUS                COMMENT 'MATCH, MISMATCH, or PDF_ONLY (no supplier-system field to compare with).'
+)
+COMMENT = 'Governance finding: contract terms on the signed PDF vs the supplier system. One row per CONTRACT_NO x TERM. Neither side is overwritten.'
+AS
+WITH c AS (
+  SELECT c.*, s.SUPPLIER_ID, s.SUPPLIER_NAME AS SRM_NAME, s.PAYMENT_TERMS AS SRM_PAYMENT_TERMS, s.CURRENCY AS SRM_CURRENCY
+  FROM SC.CONFORMED.DIM_CONTRACT c
+  LEFT JOIN SC.RAW_SUPPLIER.SUPPLIERS s ON s.SUPPLIER_ID = c.SUPPLIER_PORTAL_ID
+),
+po AS (
+  SELECT c.CONTRACT_NO,
+         COUNT(p.PO_ID) AS N,
+         COUNT_IF(p.INCOTERM IS DISTINCT FROM c.INCOTERM) AS D,
+         COUNT_IF(p.INCOTERM IS DISTINCT FROM c.INCOTERM AND p.ORDER_DATE >= c.VALID_FROM) AS D_VALID
+  FROM c LEFT JOIN SC.RAW_SUPPLIER.PURCHASE_ORDERS p ON p.SUPPLIER_ID = c.SUPPLIER_ID
+  GROUP BY c.CONTRACT_NO
+),
+po_vals AS (
+  SELECT CONTRACT_NO, LISTAGG(INCOTERM || ' ' || N, ', ') WITHIN GROUP (ORDER BY N DESC, INCOTERM) AS V
+  FROM (SELECT c.CONTRACT_NO, p.INCOTERM, COUNT(*) AS N
+        FROM c JOIN SC.RAW_SUPPLIER.PURCHASE_ORDERS p ON p.SUPPLIER_ID = c.SUPPLIER_ID GROUP BY 1, 2)
+  GROUP BY CONTRACT_NO
+),
+sp AS (
+  SELECT c.CONTRACT_NO, COUNT(x.SUPPLIER_PART_NO) AS N,
+         COUNT_IF(x.LEAD_TIME_DAYS IS DISTINCT FROM c.LEAD_TIME_DAYS) AS D,
+         MIN(x.LEAD_TIME_DAYS) AS LO, MAX(x.LEAD_TIME_DAYS) AS HI, MEDIAN(x.LEAD_TIME_DAYS) AS MED,
+         COUNT_IF(x.LEAD_TIME_DAYS = c.LEAD_TIME_DAYS) AS SAME
+  FROM c LEFT JOIN SC.RAW_SUPPLIER.SUPPLIER_PARTS x ON x.SUPPLIER_ID = c.SUPPLIER_ID
+  GROUP BY c.CONTRACT_NO
+)
+SELECT c.CONTRACT_NO, c.SUPPLIER_NO, c.SUPPLIER_PORTAL_ID, 'SUPPLIER_NAME', c.SUPPLIER_NAME_ON_CONTRACT, c.SRM_NAME,
+       'RAW_SUPPLIER.SUPPLIERS.SUPPLIER_NAME', 1, IFF(UPPER(c.SRM_NAME) IS DISTINCT FROM UPPER(c.SUPPLIER_NAME_ON_CONTRACT), 1, 0), NULL,
+       IFF(UPPER(c.SRM_NAME) IS DISTINCT FROM UPPER(c.SUPPLIER_NAME_ON_CONTRACT), 'MISMATCH', 'MATCH')
+FROM c
+UNION ALL
+SELECT c.CONTRACT_NO, c.SUPPLIER_NO, c.SUPPLIER_PORTAL_ID, 'PAYMENT_TERMS', c.PAYMENT_TERMS, c.SRM_PAYMENT_TERMS,
+       'RAW_SUPPLIER.SUPPLIERS.PAYMENT_TERMS', 1, IFF(c.SRM_PAYMENT_TERMS IS DISTINCT FROM c.PAYMENT_TERMS, 1, 0), NULL,
+       IFF(c.SRM_PAYMENT_TERMS IS DISTINCT FROM c.PAYMENT_TERMS, 'MISMATCH', 'MATCH')
+FROM c
+UNION ALL
+SELECT c.CONTRACT_NO, c.SUPPLIER_NO, c.SUPPLIER_PORTAL_ID, 'CURRENCY', c.CURRENCY, c.SRM_CURRENCY,
+       'RAW_SUPPLIER.SUPPLIERS.CURRENCY', 1, IFF(c.SRM_CURRENCY IS DISTINCT FROM c.CURRENCY, 1, 0), NULL,
+       IFF(c.SRM_CURRENCY IS DISTINCT FROM c.CURRENCY, 'MISMATCH', 'MATCH')
+FROM c
+UNION ALL
+SELECT c.CONTRACT_NO, c.SUPPLIER_NO, c.SUPPLIER_PORTAL_ID, 'INCOTERM', c.INCOTERM, v.V,
+       'RAW_SUPPLIER.PURCHASE_ORDERS.INCOTERM', po.N, po.D, po.D_VALID, IFF(po.D > 0 OR po.N = 0, 'MISMATCH', 'MATCH')
+FROM c JOIN po ON po.CONTRACT_NO = c.CONTRACT_NO LEFT JOIN po_vals v ON v.CONTRACT_NO = c.CONTRACT_NO
+UNION ALL
+SELECT c.CONTRACT_NO, c.SUPPLIER_NO, c.SUPPLIER_PORTAL_ID, 'LEAD_TIME_DAYS', c.LEAD_TIME_DAYS::VARCHAR,
+       sp.LO || '..' || sp.HI || ' days (median ' || sp.MED || '; ' || sp.SAME || ' parts equal to the PDF)',
+       'RAW_SUPPLIER.SUPPLIER_PARTS.LEAD_TIME_DAYS', sp.N, sp.D, NULL, IFF(sp.D > 0 OR sp.N = 0, 'MISMATCH', 'MATCH')
+FROM c JOIN sp ON sp.CONTRACT_NO = c.CONTRACT_NO
+UNION ALL
+SELECT c.CONTRACT_NO, c.SUPPLIER_NO, c.SUPPLIER_PORTAL_ID, 'DELIVERY_TARGET',
+       ROUND(100 * c.DELIVERY_TARGET_FRACTION, 1) || '% of PO lines, ' || c.DELIVERY_TARGET_BASIS, NULL, NULL, 0, 0, NULL, 'PDF_ONLY'
+FROM c
+UNION ALL
+SELECT c.CONTRACT_NO, c.SUPPLIER_NO, c.SUPPLIER_PORTAL_ID, 'LATE_PENALTY',
+       'grace ' || c.LATE_GRACE_DAYS || ' d, ' || ROUND(100 * c.LATE_PENALTY_PER_DAY_FRACTION, 2) || '% per day, cap '
+       || ROUND(100 * c.LATE_PENALTY_CAP_FRACTION, 2) || '%', NULL, NULL, 0, 0, NULL, 'PDF_ONLY'
+FROM c
+UNION ALL
+SELECT c.CONTRACT_NO, c.SUPPLIER_NO, c.SUPPLIER_PORTAL_ID, 'VALIDITY', c.VALID_FROM || ' .. ' || c.VALID_TO, NULL, NULL, 0, 0, NULL, 'PDF_ONLY'
+FROM c;
+
+SELECT TERM, STATUS, COUNT(*) AS CONTRACTS, SUM(ROWS_DIFFERING) AS ROWS_DIFFERING, SUM(ROWS_COMPARED) AS ROWS_COMPARED
+FROM SC.OPS.DQ_CONTRACT_TERMS_RECON GROUP BY 1, 2 ORDER BY 1, 2;

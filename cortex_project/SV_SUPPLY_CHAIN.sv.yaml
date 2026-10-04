@@ -1,0 +1,1778 @@
+name: SV_SUPPLY_CHAIN
+description: "Supply chain canonical metrics (docs/metric_contracts.md v1.4): Customer OTD %, Supplier OTD %, Fill Rate %, Days of Inventory, Landed Cost per Unit, Landed Cost Uplift %. The only place metric logic lives."
+tables:
+  - name: CONTRACTS
+    synonyms:
+      - contract
+      - agreement
+      - supply agreement
+      - MSA
+    description: "Contract: supply agreement with one Supplier. Terms (delivery target, lead time, Incoterm, payment terms, late-delivery penalty, validity) come from the signed PDF, the legal source. One row per CONTRACT_NO."
+    base_table:
+      database: SC
+      schema: CONFORMED
+      table: DIM_CONTRACT
+    primary_key:
+      columns:
+        - CONTRACT_NO
+    dimensions:
+      - name: CONTRACT_CURRENCY
+        description: Contract currency.
+        expr: contracts.CURRENCY
+        data_type: VARCHAR(16777216)
+        access_modifier: public_access
+      - name: CONTRACT_DELIVERY_TARGET
+        synonyms:
+          - contracted delivery target
+          - contractual delivery performance target
+        description: "Contracted on-time delivery target as a 0-1 fraction of PO lines (show x 100 as %). A contract TERM, not a measured metric, and NOT comparable with SUPPLIER_OTD_PCT (the contract measures against the confirmed date with grace days; Supplier OTD % uses the first commit date and a [-1, 0] day window)."
+        expr: contracts.DELIVERY_TARGET_FRACTION
+        data_type: "NUMBER(9,6)"
+        access_modifier: public_access
+      - name: CONTRACT_DELIVERY_TARGET_BASIS
+        description: How the contract says the delivery target is measured (e.g. monthly).
+        expr: contracts.DELIVERY_TARGET_BASIS
+        data_type: VARCHAR(16777216)
+        access_modifier: public_access
+      - name: CONTRACT_DOC_FILE_PATH
+        description: Signed PDF on @SC.RAW_DOCS.CONTRACTS (legal source).
+        expr: contracts.DOC_FILE_PATH
+        data_type: VARCHAR(16777216)
+        access_modifier: public_access
+      - name: CONTRACT_HAS_INCOTERM_MISMATCH
+        description: "DQ flag INCOTERM_MISMATCH_PO_LINES: some PO lines of the supplier use a different Incoterm than the contract."
+        expr: "ARRAY_CONTAINS('INCOTERM_MISMATCH_PO_LINES'::VARIANT, contracts.DQ_FLAGS)"
+        data_type: BOOLEAN
+        access_modifier: public_access
+      - name: CONTRACT_HAS_LEAD_TIME_MISMATCH
+        description: "DQ flag LEAD_TIME_MISMATCH_SUPPLIER_PARTS: some supplier parts quote a different lead time than the contract."
+        expr: "ARRAY_CONTAINS('LEAD_TIME_MISMATCH_SUPPLIER_PARTS'::VARIANT, contracts.DQ_FLAGS)"
+        data_type: BOOLEAN
+        access_modifier: public_access
+      - name: CONTRACT_HAS_PAYMENT_TERMS_MISMATCH
+        description: "DQ flag PAYMENT_TERMS_MISMATCH: PDF payment terms differ from the supplier master (neither side overwritten)."
+        expr: "ARRAY_CONTAINS('PAYMENT_TERMS_MISMATCH'::VARIANT, contracts.DQ_FLAGS)"
+        data_type: BOOLEAN
+        access_modifier: public_access
+      - name: CONTRACT_INCOTERM
+        description: "Contracted Incoterm (three-letter code, Incoterms 2020)."
+        expr: contracts.INCOTERM
+        data_type: VARCHAR(16777216)
+        access_modifier: public_access
+      - name: CONTRACT_LATE_GRACE_DAYS
+        description: Days after the confirmed date a PO line may arrive before the late-delivery penalty applies.
+        expr: contracts.LATE_GRACE_DAYS
+        data_type: "NUMBER(38,0)"
+        access_modifier: public_access
+      - name: CONTRACT_LATE_PENALTY_CAP
+        description: "Cap of the late-delivery credit, 0-1 fraction of the line value (show x 100 as %)."
+        expr: contracts.LATE_PENALTY_CAP_FRACTION
+        data_type: "NUMBER(9,6)"
+        access_modifier: public_access
+      - name: CONTRACT_LATE_PENALTY_PER_DAY
+        description: "Late-delivery credit per day late, 0-1 fraction of the line value (show x 100 as %)."
+        expr: contracts.LATE_PENALTY_PER_DAY_FRACTION
+        data_type: "NUMBER(9,6)"
+        access_modifier: public_access
+      - name: CONTRACT_LEAD_TIME_BASIS
+        description: Event the contracted lead time is counted from (e.g. PO acknowledgement).
+        expr: contracts.LEAD_TIME_BASIS
+        data_type: VARCHAR(16777216)
+        access_modifier: public_access
+      - name: CONTRACT_LEAD_TIME_DAYS
+        synonyms:
+          - contracted lead time
+          - contract lead time
+        description: "Contracted standard lead time in calendar days, counted from contract_lead_time_basis."
+        expr: contracts.LEAD_TIME_DAYS
+        data_type: "NUMBER(38,0)"
+        access_modifier: public_access
+      - name: CONTRACT_NO
+        synonyms:
+          - contract number
+          - agreement number
+        description: "Contract natural key as printed on the signed PDF, e.g. CTR-S0011-2026."
+        expr: contracts.CONTRACT_NO
+        data_type: VARCHAR(16777216)
+        access_modifier: public_access
+      - name: CONTRACT_PAYMENT_TERMS
+        description: Contracted payment terms (e.g. NET60).
+        expr: contracts.PAYMENT_TERMS
+        data_type: VARCHAR(16777216)
+        access_modifier: public_access
+      - name: CONTRACT_PENALTY_CLAUSE
+        synonyms:
+          - penalty clause
+          - late delivery penalty
+        description: Late-delivery penalty clause as worded in the signed PDF. For other wording questions use the contract search service.
+        expr: contracts.PENALTY_CLAUSE_TEXT
+        data_type: VARCHAR(16777216)
+        access_modifier: public_access
+      - name: CONTRACT_SUPPLIER_NAME
+        description: Supplier name as printed on the contract.
+        expr: contracts.SUPPLIER_NAME_ON_CONTRACT
+        data_type: VARCHAR(16777216)
+        access_modifier: public_access
+      - name: CONTRACT_VALID_FROM
+        synonyms:
+          - contract effective date
+          - contract start date
+        description: Contract effective date.
+        expr: contracts.VALID_FROM
+        data_type: DATE
+        access_modifier: public_access
+      - name: CONTRACT_VALID_TO
+        synonyms:
+          - contract end date
+          - contract expiry date
+        description: Last day the contract is valid.
+        expr: contracts.VALID_TO
+        data_type: DATE
+        access_modifier: public_access
+  - name: CUSTOMERS
+    synonyms:
+      - client
+      - account
+      - buyer
+      - sold-to
+    description: "Customer: sold-to party. Customer hierarchy Segment > Customer."
+    base_table:
+      database: SC
+      schema: CONFORMED
+      table: DIM_CUSTOMER
+    primary_key:
+      columns:
+        - CUSTOMER_NO
+    dimensions:
+      - name: CUSTOMER_COUNTRY
+        description: ISO country of the ship-to.
+        expr: customers.COUNTRY_CODE
+        data_type: VARCHAR(2)
+        access_modifier: public_access
+      - name: CUSTOMER_NAME
+        description: Customer name.
+        expr: customers.CUSTOMER_NAME
+        data_type: VARCHAR(16777216)
+        access_modifier: public_access
+      - name: CUSTOMER_NO
+        synonyms:
+          - customer number
+          - sold-to number
+        description: "Customer hierarchy level 2 (leaf). Parent: customer_segment."
+        expr: customers.CUSTOMER_NO
+        data_type: VARCHAR(16777216)
+        access_modifier: public_access
+      - name: CUSTOMER_REGION
+        description: Company region of the customer ship-to.
+        expr: customers.REGION
+        data_type: VARCHAR(4)
+        access_modifier: public_access
+      - name: CUSTOMER_SEGMENT
+        synonyms:
+          - segment
+          - customer group
+        description: "Customer hierarchy level 1: Strategic, Key Account, Distributor, SMB, Intercompany."
+        expr: customers.SEGMENT
+        data_type: VARCHAR(12)
+        access_modifier: public_access
+      - name: IS_INTERCOMPANY
+        description: TRUE for intercompany sold-to parties (excluded from Customer OTD % and Fill Rate %).
+        expr: customers.IS_INTERCOMPANY
+        data_type: BOOLEAN
+        access_modifier: public_access
+  - name: DATES
+    synonyms:
+      - calendar
+      - fiscal calendar
+      - period
+    description: "Calendar with 4-4-5 fiscal attributes (ISO weeks). Role-played: joined to each fact on that metric's time anchor (commit date, GR posting date, snapshot date)."
+    base_table:
+      database: SC
+      schema: CONFORMED
+      table: DIM_DATE
+    primary_key:
+      columns:
+        - DATE
+    dimensions:
+      - name: CALENDAR_DATE
+        synonyms:
+          - day
+          - date
+        description: "Time hierarchy leaf (day). Means the time anchor of the metric queried: commit date (Customer OTD, Fill Rate, Supplier OTD), GR posting date (Landed Cost), snapshot date (DOI)."
+        expr: dates."DATE"
+        data_type: DATE
+        access_modifier: public_access
+      - name: CALENDAR_MONTH
+        synonyms:
+          - calendar month
+        description: Calendar month 1-12. Use only when the user names a calendar month (e.g. September 2026); combine with calendar_year.
+        expr: dates.MONTH
+        data_type: "NUMBER(2,0)"
+        access_modifier: public_access
+      - name: CALENDAR_MONTH_END_DATE
+        description: Last day of the calendar month.
+        expr: dates.CALENDAR_MONTH_END_DATE
+        data_type: DATE
+        access_modifier: public_access
+      - name: CALENDAR_MONTH_LABEL
+        description: "Calendar month label, e.g. Sep 2026. Use when the user names a calendar month, and ALWAYS for Supplier Contractual OTD % / Gap; say \"calendar month, not fiscal\" in the answer."
+        expr: dates.CALENDAR_MONTH_LABEL
+        data_type: VARCHAR(134217728)
+        access_modifier: public_access
+      - name: CALENDAR_MONTH_NAME
+        description: Calendar month abbreviation (Jan..Dec).
+        expr: dates.MONTH_NAME
+        data_type: VARCHAR(3)
+        access_modifier: public_access
+      - name: CALENDAR_MONTH_OFFSET
+        description: "Calendar months relative to today: 0 = current calendar month, -1 = last complete calendar month. Period filter of Supplier Contractual OTD % / Gap (contract v1.4 §3.1); fiscal metrics use fiscal_month_offset."
+        expr: dates.CALENDAR_MONTH_OFFSET
+        data_type: "NUMBER(38,0)"
+        access_modifier: public_access
+      - name: CALENDAR_MONTH_START_DATE
+        description: First day of the calendar month.
+        expr: dates.CALENDAR_MONTH_START_DATE
+        data_type: DATE
+        access_modifier: public_access
+      - name: CALENDAR_QUARTER
+        synonyms:
+          - calendar quarter
+        description: Calendar quarter 1-4.
+        expr: dates.QUARTER
+        data_type: "NUMBER(2,0)"
+        access_modifier: public_access
+      - name: CALENDAR_YEAR
+        synonyms:
+          - calendar year
+        description: Calendar year.
+        expr: dates.YEAR
+        data_type: "NUMBER(4,0)"
+        access_modifier: public_access
+      - name: FISCAL_MONTH
+        synonyms:
+          - month
+          - fiscal month
+          - fiscal period
+        description: "Fiscal month 1-12 on a 4-4-5 pattern (week 53 joins month 12). Parent: fiscal_quarter. Default meaning of \"month\"."
+        expr: dates.FISCAL_PERIOD
+        data_type: "NUMBER(12,0)"
+        access_modifier: public_access
+      - name: FISCAL_MONTH_END_DATE
+        description: Last day of the fiscal month.
+        expr: dates.FISCAL_PERIOD_END_DATE
+        data_type: DATE
+        access_modifier: public_access
+      - name: FISCAL_MONTH_LABEL
+        description: "Fiscal month label, e.g. FY2026-P09. Unique across years; use for monthly trends."
+        expr: dates.FISCAL_PERIOD_LABEL
+        data_type: VARCHAR(134217728)
+        access_modifier: public_access
+      - name: FISCAL_MONTH_OFFSET
+        synonyms:
+          - months ago
+          - relative month
+        description: "Fiscal months (4-4-5 periods) relative to today: 0 = this month, -1 = last month, BETWEEN -N AND -1 = last N completed months. Use for every relative month question."
+        expr: dates.FISCAL_MONTH_OFFSET
+        data_type: "NUMBER(38,0)"
+        access_modifier: public_access
+      - name: FISCAL_MONTH_START_DATE
+        description: First day of the fiscal month. Return with fiscal_month_label so answers state the dates used.
+        expr: dates.FISCAL_PERIOD_START_DATE
+        data_type: DATE
+        access_modifier: public_access
+      - name: FISCAL_QUARTER
+        synonyms:
+          - quarter
+          - fiscal quarter
+        description: "Fiscal quarter 1-4 (13 weeks; 14 in a 53-week year). Parent: fiscal_year."
+        expr: dates.FISCAL_QUARTER
+        data_type: "NUMBER(9,0)"
+        access_modifier: public_access
+      - name: FISCAL_QUARTER_END_DATE
+        description: Last day of the fiscal quarter.
+        expr: dates.FISCAL_QUARTER_END_DATE
+        data_type: DATE
+        access_modifier: public_access
+      - name: FISCAL_QUARTER_LABEL
+        description: "Fiscal quarter label, e.g. FY2026-Q3. Unique across years."
+        expr: dates.FISCAL_QUARTER_LABEL
+        data_type: VARCHAR(134217728)
+        access_modifier: public_access
+      - name: FISCAL_QUARTER_OFFSET
+        synonyms:
+          - quarters ago
+          - relative quarter
+        description: "Fiscal quarters relative to today: 0 = this quarter, -1 = last quarter."
+        expr: dates.FISCAL_QUARTER_OFFSET
+        data_type: "NUMBER(38,0)"
+        access_modifier: public_access
+      - name: FISCAL_QUARTER_START_DATE
+        description: First day of the fiscal quarter.
+        expr: dates.FISCAL_QUARTER_START_DATE
+        data_type: DATE
+        access_modifier: public_access
+      - name: FISCAL_WEEK
+        synonyms:
+          - week
+          - fiscal week
+        description: "Fiscal week 1-53 (ISO week). Parent: fiscal_month."
+        expr: dates.FISCAL_WEEK
+        data_type: "NUMBER(2,0)"
+        access_modifier: public_access
+      - name: FISCAL_WEEK_END_DATE
+        description: Last day (Sunday) of the fiscal week.
+        expr: dates.FISCAL_WEEK_END_DATE
+        data_type: DATE
+        access_modifier: public_access
+      - name: FISCAL_WEEK_LABEL
+        description: "Fiscal week label, e.g. FY2026-W39. Return with fiscal_week_start_date / fiscal_week_end_date for week questions."
+        expr: dates.FISCAL_WEEK_LABEL
+        data_type: VARCHAR(134217728)
+        access_modifier: public_access
+      - name: FISCAL_WEEK_OFFSET
+        synonyms:
+          - weeks ago
+          - relative week
+        description: "Fiscal weeks relative to today: 0 = this week, -1 = last week. Use for relative week questions."
+        expr: dates.FISCAL_WEEK_OFFSET
+        data_type: "NUMBER(38,0)"
+        access_modifier: public_access
+      - name: FISCAL_WEEK_START_DATE
+        description: First day (Monday) of the fiscal week.
+        expr: dates.WEEK_START_DATE
+        data_type: DATE
+        access_modifier: public_access
+      - name: FISCAL_YEAR
+        synonyms:
+          - year
+          - fiscal year
+          - FY
+        description: Fiscal year = ISO week-numbering year (top of the Time hierarchy).
+        expr: dates.FISCAL_YEAR
+        data_type: "NUMBER(4,0)"
+        access_modifier: public_access
+      - name: FISCAL_YEAR_END_DATE
+        description: Last day of the fiscal year.
+        expr: dates.FISCAL_YEAR_END_DATE
+        data_type: DATE
+        access_modifier: public_access
+      - name: FISCAL_YEAR_LABEL
+        description: "Fiscal year label, e.g. FY2026. Return with fiscal_year_start_date / fiscal_year_end_date for year questions."
+        expr: dates.FISCAL_YEAR_LABEL
+        data_type: VARCHAR(134217728)
+        access_modifier: public_access
+      - name: FISCAL_YEAR_OFFSET
+        synonyms:
+          - years ago
+          - relative year
+        description: "Fiscal years relative to today: 0 = this fiscal year (YTD), -1 = last fiscal year."
+        expr: dates.FISCAL_YEAR_OFFSET
+        data_type: "NUMBER(38,0)"
+        access_modifier: public_access
+      - name: FISCAL_YEAR_START_DATE
+        description: First day of the fiscal year (Monday of ISO week 1).
+        expr: dates.FISCAL_YEAR_START_DATE
+        data_type: DATE
+        access_modifier: public_access
+  - name: GOODS_RECEIPTS
+    synonyms:
+      - goods receipt
+      - GR
+      - receipt
+    description: "Goods receipt: one posted receipt against a PO line, with landed-cost components. Grain of Landed Cost per Unit. One row per GR_NO."
+    base_table:
+      database: SC
+      schema: CONFORMED
+      table: FACT_GOODS_RECEIPT
+    primary_key:
+      columns:
+        - GR_NO
+    dimensions:
+      - name: GR_ARRIVAL_SOURCE
+        description: "Arrival evidence of the receipt: IOT_GEOFENCE, CARRIER_POD or GR_POSTING (GR_FALLBACK)."
+        expr: goods_receipts.ARRIVAL_SOURCE
+        data_type: VARCHAR(16777216)
+        access_modifier: public_access
+      - name: GR_FREIGHT_ALLOC_BASIS
+        description: "Freight allocation basis: SINGLE_LINE, WEIGHT or ALLOC_BY_VALUE."
+        expr: goods_receipts.FREIGHT_ALLOC_BASIS
+        data_type: VARCHAR(16777216)
+        access_modifier: public_access
+      - name: GR_IS_IMPORT
+        description: TRUE when supplier country differs from the receiving plant country.
+        expr: goods_receipts.IS_IMPORT
+        data_type: BOOLEAN
+        access_modifier: public_access
+      - name: GR_IS_PROVISIONAL
+        description: "DQ flag PROVISIONAL: price, freight or duty estimated or missing."
+        expr: goods_receipts.IS_PROVISIONAL
+        data_type: BOOLEAN
+        access_modifier: public_access
+      - name: GR_NO
+        synonyms:
+          - goods receipt number
+          - GR number
+        description: ERP goods-receipt document.
+        expr: goods_receipts.GR_NO
+        data_type: VARCHAR(16777216)
+        access_modifier: public_access
+      - name: GR_POSTING_DATE
+        synonyms:
+          - receipt date
+          - GR date
+        description: "GR posting date, plant-local. Time anchor of Landed Cost per Unit."
+        expr: goods_receipts.POSTING_DATE
+        data_type: DATE
+        access_modifier: public_access
+    facts:
+      - name: HAS_LANDED_COST_EVIDENCE_GAP
+        description: "TRUE when price, freight or duty is estimated / missing (PROVISIONAL) or freight was allocated by value (ALLOC_BY_VALUE)."
+        expr: "goods_receipts.IS_PROVISIONAL OR ARRAY_CONTAINS('ALLOC_BY_VALUE'::VARIANT, goods_receipts.DQ_FLAGS)"
+        data_type: BOOLEAN
+        access_modifier: private_access
+      - name: IS_LANDED_COST_POPULATION
+        description: "Population of Landed Cost per Unit: receipts of stocked, mapped parts on priced PO lines (excludes service / non-stock receipts, unpriced samples and amounts without FX). No intercompany receipts exist in CONFORMED."
+        expr: |-
+          purchase_order_lines.is_stock_part_line AND goods_receipts.PART_NO IS NOT NULL
+                   AND goods_receipts.UNIT_PRICE_AMT > 0
+        data_type: BOOLEAN
+        access_modifier: private_access
+      - name: IS_UNMAPPED_STOCK_RECEIPT
+        description: "Priced receipt on a stock PO line whose supplier part number maps to no ERP part (UNMAPPED_PART): outside the landed-cost population, counted as not covered."
+        expr: |-
+          purchase_order_lines.is_stock_part_line AND goods_receipts.PART_NO IS NULL
+                   AND goods_receipts.UNIT_PRICE_AMT > 0
+        data_type: BOOLEAN
+        access_modifier: private_access
+      - name: RECEIPT_LANDED_COST_AMT
+        description: "Total landed cost of the receipt = product cost + allocated freight + accessorials + non-recoverable duties + insurance, USD. Missing components count as 0 and the receipt is PROVISIONAL."
+        expr: |-
+          goods_receipts.receipt_product_cost_amt + COALESCE(goods_receipts.FREIGHT_AMT, 0)
+                   + COALESCE(goods_receipts.ACCESSORIAL_AMT, 0) + COALESCE(goods_receipts.DUTY_AMT, 0)
+                   + COALESCE(goods_receipts.INSURANCE_AMT, 0)
+        data_type: "NUMBER(38,7)"
+        access_modifier: private_access
+      - name: RECEIPT_PRODUCT_COST_AMT
+        description: "Invoiced unit price (PO price when PROVISIONAL) x received qty, USD."
+        expr: goods_receipts.UNIT_PRICE_AMT * goods_receipts.RECEIVED_QTY
+        data_type: "NUMBER(36,7)"
+        access_modifier: private_access
+      - name: RECEIPT_QTY
+        description: "Received qty, base UoM. No return-to-vendor reversal documents exist in CONFORMED yet, so nothing is netted."
+        expr: goods_receipts.RECEIVED_QTY
+        data_type: "NUMBER(18,3)"
+        access_modifier: private_access
+    metrics:
+      - name: INVOICED_PRODUCT_COST_AMT
+        description: "Invoiced price x received qty, USD (base of the landed-cost uplift)."
+        expr: "SUM(IFF(goods_receipts.is_landed_cost_population, goods_receipts.receipt_product_cost_amt, NULL))"
+        access_modifier: public_access
+        using_relationships:
+          - GOODS_RECEIPT_TO_POSTING_DATE
+      - name: LANDED_COST_ACCESSORIAL_AMT
+        description: "Component of TOTAL_LANDED_COST_AMT: accessorials (expedite, handling, packaging, demurrage, detention, liftgate), USD."
+        expr: "SUM(IFF(goods_receipts.is_landed_cost_population, COALESCE(goods_receipts.ACCESSORIAL_AMT, 0), NULL))"
+        access_modifier: public_access
+        using_relationships:
+          - GOODS_RECEIPT_TO_POSTING_DATE
+      - name: LANDED_COST_DUTY_AMT
+        description: "Component of TOTAL_LANDED_COST_AMT: non-recoverable duties, USD. Missing duty counts as 0 (PROVISIONAL)."
+        expr: "SUM(IFF(goods_receipts.is_landed_cost_population, COALESCE(goods_receipts.DUTY_AMT, 0), NULL))"
+        access_modifier: public_access
+        using_relationships:
+          - GOODS_RECEIPT_TO_POSTING_DATE
+      - name: LANDED_COST_EVIDENCE_COVERAGE_PCT
+        description: "Evidence coverage of Landed Cost per Unit and Uplift % (contract v1.2 §6): receipts in the population neither PROVISIONAL nor ALLOC_BY_VALUE / (population receipts + UNMAPPED_PART stock receipts). 0-1 fraction."
+        expr: |-
+          (COUNT_IF(goods_receipts.is_landed_cost_population AND NOT goods_receipts.has_landed_cost_evidence_gap)
+                    / NULLIF(COUNT_IF(goods_receipts.is_landed_cost_population OR goods_receipts.is_unmapped_stock_receipt), 0))::NUMBER(9,6)
+        access_modifier: public_access
+        using_relationships:
+          - GOODS_RECEIPT_TO_POSTING_DATE
+      - name: LANDED_COST_FREIGHT_AMT
+        description: "Component of TOTAL_LANDED_COST_AMT: allocated freight (supplier-invoiced or carrier freight allocated by chargeable weight), USD. Missing freight counts as 0 (PROVISIONAL). Use to explain an uplift; not a per-unit metric."
+        expr: "SUM(IFF(goods_receipts.is_landed_cost_population, COALESCE(goods_receipts.FREIGHT_AMT, 0), NULL))"
+        access_modifier: public_access
+        using_relationships:
+          - GOODS_RECEIPT_TO_POSTING_DATE
+      - name: LANDED_COST_INSURANCE_AMT
+        description: "Component of TOTAL_LANDED_COST_AMT: insurance, USD (no source system yet, so 0; contract §6 known limitation 4)."
+        expr: "SUM(IFF(goods_receipts.is_landed_cost_population, COALESCE(goods_receipts.INSURANCE_AMT, 0), NULL))"
+        access_modifier: public_access
+        using_relationships:
+          - GOODS_RECEIPT_TO_POSTING_DATE
+      - name: LANDED_COST_PER_UNIT
+        synonyms:
+          - landed cost
+          - landed cost per unit
+          - actual landed cost
+          - unit landed cost
+          - total landed cost per unit
+          - LCU
+          - delivered cost per unit
+        description: "Landed Cost per Unit (contract v1.2 §6) = TOTAL_LANDED_COST_AMT / LANDED_COST_RECEIVED_QTY, USD per base UoM, quantity-weighted, by GR posting date. Only defined within ONE Part: returns NULL when the group spans more than one part, so always group by part_no. Above Part level use TOTAL_LANDED_COST_AMT or LANDED_COST_UPLIFT_PCT."
+        expr: |-
+          IFF(COUNT(DISTINCT IFF(goods_receipts.is_landed_cost_population, goods_receipts.PART_NO, NULL)) = 1,
+                       SUM(IFF(goods_receipts.is_landed_cost_population, goods_receipts.receipt_landed_cost_amt, NULL))
+                       / NULLIF(SUM(IFF(goods_receipts.is_landed_cost_population, goods_receipts.receipt_qty, NULL)), 0),
+                       NULL)::NUMBER(18,4)
+        access_modifier: public_access
+        using_relationships:
+          - GOODS_RECEIPT_TO_POSTING_DATE
+      - name: LANDED_COST_RECEIVED_QTY
+        description: "Landed Cost per Unit denominator: received qty in base UoM (meaningful within one Part)."
+        expr: "SUM(IFF(goods_receipts.is_landed_cost_population, goods_receipts.receipt_qty, NULL))"
+        access_modifier: public_access
+        using_relationships:
+          - GOODS_RECEIPT_TO_POSTING_DATE
+      - name: LANDED_COST_UNMAPPED_PART_RECEIPTS
+        description: "Priced stock receipts whose supplier part number maps to no ERP part (UNMAPPED_PART): not in Landed Cost per Unit / Uplift %, counted as not covered in LANDED_COST_EVIDENCE_COVERAGE_PCT."
+        expr: COUNT_IF(goods_receipts.is_unmapped_stock_receipt)
+        access_modifier: public_access
+        using_relationships:
+          - GOODS_RECEIPT_TO_POSTING_DATE
+      - name: LANDED_COST_UPLIFT_PCT
+        synonyms:
+          - landed cost uplift
+          - landed-cost uplift %
+          - landed cost uplift percent
+          - uplift over invoiced price
+          - landed cost markup
+        description: "Landed Cost Uplift % (contract v1.2 §6.1) = TOTAL_LANDED_COST_AMT / INVOICED_PRODUCT_COST_AMT - 1: how much freight, accessorials, duties and insurance add on top of the invoiced price. 0-1 fraction, ratio of sums, valid at any level incl. across parts; same population as Landed Cost per Unit. NULL when invoiced cost is 0. PROVISIONAL receipts understate it (missing freight / duty count as 0)."
+        expr: |-
+          (SUM(IFF(goods_receipts.is_landed_cost_population, goods_receipts.receipt_landed_cost_amt, NULL))
+                    / NULLIF(SUM(IFF(goods_receipts.is_landed_cost_population, goods_receipts.receipt_product_cost_amt, NULL)), 0) - 1)::NUMBER(9,6)
+        access_modifier: public_access
+        using_relationships:
+          - GOODS_RECEIPT_TO_POSTING_DATE
+      - name: RECEIPTS_FIRST_POSTING_DATE
+        description: "Data range start (contract v1.3.1 section 7.1) of Landed Cost per Unit / Uplift %: earliest GR posting date among the receipts in scope (population + UNMAPPED_PART receipts). Return it with every no-period answer."
+        expr: "MIN(IFF(goods_receipts.is_landed_cost_population OR goods_receipts.is_unmapped_stock_receipt, goods_receipts.POSTING_DATE, NULL))"
+        access_modifier: public_access
+        using_relationships:
+          - GOODS_RECEIPT_TO_POSTING_DATE
+      - name: RECEIPTS_LAST_POSTING_DATE
+        description: "Data range end of Landed Cost per Unit / Uplift %: latest GR posting date among the receipts in scope."
+        expr: "MAX(IFF(goods_receipts.is_landed_cost_population OR goods_receipts.is_unmapped_stock_receipt, goods_receipts.POSTING_DATE, NULL))"
+        access_modifier: public_access
+        using_relationships:
+          - GOODS_RECEIPT_TO_POSTING_DATE
+      - name: TOTAL_LANDED_COST_AMT
+        description: "Landed Cost per Unit numerator: invoiced price x received qty + allocated freight + accessorials + non-recoverable duties + insurance, USD. Valid at any level."
+        expr: "SUM(IFF(goods_receipts.is_landed_cost_population, goods_receipts.receipt_landed_cost_amt, NULL))"
+        access_modifier: public_access
+        using_relationships:
+          - GOODS_RECEIPT_TO_POSTING_DATE
+  - name: INVENTORY
+    synonyms:
+      - stock
+      - on-hand
+      - stock position
+      - inventory balance
+      - inventory snapshot
+    description: "InventorySnapshot: end-of-day stock of a Part at a Plant by stock status, with demand inputs. Grain of Days of Inventory. One row per PART_NO x PLANT_CODE x SNAPSHOT_DATE."
+    base_table:
+      database: SC
+      schema: CONFORMED
+      table: FACT_INVENTORY_SNAPSHOT
+    primary_key:
+      columns:
+        - PART_NO
+        - PLANT_CODE
+        - SNAPSHOT_DATE
+    dimensions:
+      - name: INVENTORY_BASE_UOM
+        description: Base unit of measure of the inventory quantities.
+        expr: inventory.BASE_UOM
+        data_type: VARCHAR(2)
+        access_modifier: public_access
+      - name: INVENTORY_SNAPSHOT_DATE
+        synonyms:
+          - snapshot date
+          - stock date
+        description: Plant-local end-of-day snapshot date. Time anchor of Days of Inventory.
+        expr: inventory.SNAPSHOT_DATE
+        data_type: DATE
+        access_modifier: public_access
+      - name: IS_DEMAND_FALLBACK_SNAPSHOT
+        description: "DQ flag DEMAND_FALLBACK: demand from trailing 28-day shipments because no forecast exists."
+        expr: inventory.is_demand_fallback
+        data_type: BOOLEAN
+        access_modifier: public_access
+      - name: SNAPSHOT_DATE
+        synonyms:
+          - inventory as-of date
+          - stock snapshot date
+        description: "Plant-local snapshot date as a DIMENSION (same column as inventory_snapshot_date). Grouping DOI by it returns one value per snapshot date: for \"now\" keep only the latest date (ORDER BY snapshot_date DESC LIMIT 1, or QUALIFY per plant), or use the METRIC DOI_SNAPSHOT_DATE instead."
+        expr: inventory.SNAPSHOT_DATE
+        data_type: DATE
+        access_modifier: public_access
+    facts:
+      - name: DAILY_DEMAND_QTY
+        description: Average daily demand (contract v1.2 §5) = forecast qty over the days the run covers / those days; fallback trailing 28-day shipped qty / 28 (DEMAND_FALLBACK).
+        expr: |-
+          IFF(inventory.is_demand_fallback, inventory.SHIPPED_QTY_TRAILING_28D / 28,
+                       inventory.FORECAST_QTY_NEXT_28D / inventory.FORECAST_DAYS_COVERED)
+        data_type: "NUMBER(24,9)"
+        access_modifier: private_access
+      - name: HAS_DOI_EVIDENCE_GAP
+        description: "TRUE when the row carries DEMAND_FALLBACK, NO_DEMAND or NEGATIVE_STOCK."
+        expr: |-
+          inventory.is_demand_fallback OR inventory.daily_demand_qty = 0
+                   OR ARRAY_CONTAINS('NEGATIVE_STOCK'::VARIANT, inventory.DQ_FLAGS)
+        data_type: BOOLEAN
+        access_modifier: private_access
+      - name: IS_DEMAND_FALLBACK
+        description: "DEMAND_FALLBACK (contract v1.2 §5): the latest forecast run covers fewer than 14 days of snapshot+1..+28 (or there is no run), so trailing 28-day shipments are used."
+        expr: "inventory.FORECAST_QTY_NEXT_28D IS NULL OR COALESCE(inventory.FORECAST_DAYS_COVERED, 0) < 14"
+        data_type: BOOLEAN
+        access_modifier: private_access
+      - name: IS_DOI_POPULATION
+        description: "Population of Days of Inventory: stocked parts only. Quarantine / blocked stock is excluded through UNRESTRICTED_QTY; no consignment or customer-owned stock exists in CONFORMED."
+        expr: parts.is_stocked = TRUE
+        data_type: BOOLEAN
+        access_modifier: private_access
+      - name: USABLE_QTY
+        description: "Usable inventory = unrestricted on-hand (negative floored to 0 in CONFORMED) + owned in-transit, base UoM."
+        expr: "inventory.UNRESTRICTED_QTY + IFF(inventory.IS_IN_TRANSIT_OWNED, inventory.IN_TRANSIT_QTY, 0)"
+        data_type: "NUMBER(19,3)"
+        access_modifier: private_access
+    metrics:
+      - name: AVG_DAILY_DEMAND_QTY
+        description: "DOI denominator within one Part: forecast qty / days covered (fallback trailing 28-day shipments / 28 when coverage < 14 days) at the last snapshot of the period, base UoM. NULL when the group mixes units of measure."
+        expr: |-
+          IFF(COUNT(DISTINCT IFF(inventory.is_doi_population, inventory.BASE_UOM, NULL)) > 1, NULL,
+                       SUM(IFF(inventory.is_doi_population, inventory.daily_demand_qty, NULL)))
+        access_modifier: public_access
+        non_additive_dimensions:
+          - table: INVENTORY
+            dimension: INVENTORY_SNAPSHOT_DATE
+            sort_direction: ascending
+            null_order: last
+      - name: DAILY_DEMAND_VALUE_AMT
+        description: "DOI denominator above Part level: average daily demand x standard cost, USD, at the last snapshot of the period."
+        expr: "SUM(IFF(inventory.is_doi_population, inventory.daily_demand_qty * parts.standard_cost_amt, NULL))"
+        access_modifier: public_access
+        non_additive_dimensions:
+          - table: INVENTORY
+            dimension: INVENTORY_SNAPSHOT_DATE
+            sort_direction: ascending
+            null_order: last
+      - name: DAYS_OF_INVENTORY
+        synonyms:
+          - days of inventory
+          - DOI
+          - days of supply
+          - DOS
+          - days of cover
+          - days of coverage
+          - inventory coverage
+          - days on hand
+        description: "Days of Inventory (contract v1.2 §5) = usable inventory / average daily demand, at the LAST snapshot date of the period (never averaged or summed over dates). Weighted by standard cost: SUM(usable x std cost) / SUM(daily demand x std cost); within one Part the cost cancels, so this equals SUM(usable) / SUM(daily demand). Daily demand = forecast / days covered, or trailing 28-day shipments / 28 when the forecast covers < 14 days. NULL when demand is 0 (no demand)."
+        expr: |-
+          (SUM(IFF(inventory.is_doi_population, inventory.usable_qty * parts.standard_cost_amt, NULL))
+                    / NULLIF(SUM(IFF(inventory.is_doi_population, inventory.daily_demand_qty * parts.standard_cost_amt, NULL)), 0))::NUMBER(18,6)
+        access_modifier: public_access
+        non_additive_dimensions:
+          - table: INVENTORY
+            dimension: INVENTORY_SNAPSHOT_DATE
+            sort_direction: ascending
+            null_order: last
+      - name: DOI_EVIDENCE_COVERAGE_PCT
+        description: "Evidence coverage of Days of Inventory: share of part x plant snapshots (last snapshot of the period) without DEMAND_FALLBACK, NO_DEMAND or NEGATIVE_STOCK."
+        expr: |-
+          (COUNT_IF(inventory.is_doi_population AND NOT inventory.has_doi_evidence_gap)
+                    / NULLIF(COUNT_IF(inventory.is_doi_population), 0))::NUMBER(9,6)
+        access_modifier: public_access
+        non_additive_dimensions:
+          - table: INVENTORY
+            dimension: INVENTORY_SNAPSHOT_DATE
+            sort_direction: ascending
+            null_order: last
+      - name: DOI_SNAPSHOT_DATE
+        synonyms:
+          - as-of date
+          - snapshot date of DOI
+          - stock as of
+        description: "As-of snapshot date of DAYS_OF_INVENTORY: the plant-local snapshot date the value is taken from (the last snapshot of the period; with no date filter, the latest snapshot). This is a METRIC: put it under METRICS, never DIMENSIONS (the dimension is inventory.snapshot_date). Select it with every DOI answer and state it (contract v1.3 section 7.1)."
+        expr: "MAX(IFF(inventory.is_doi_population, inventory.SNAPSHOT_DATE, NULL))"
+        access_modifier: public_access
+        non_additive_dimensions:
+          - table: INVENTORY
+            dimension: INVENTORY_SNAPSHOT_DATE
+            sort_direction: ascending
+            null_order: last
+      - name: INVENTORY_FIRST_SNAPSHOT_DATE
+        description: "Data range start (contract v1.3.1 section 7.1) of the inventory history in the query scope: earliest snapshot date. DOI itself is always the last snapshot (DOI_SNAPSHOT_DATE)."
+        expr: "MIN(IFF(inventory.is_doi_population, inventory.SNAPSHOT_DATE, NULL))"
+        access_modifier: public_access
+      - name: INVENTORY_LAST_SNAPSHOT_DATE
+        description: "Data range end of the inventory history in the query scope: latest snapshot date."
+        expr: "MAX(IFF(inventory.is_doi_population, inventory.SNAPSHOT_DATE, NULL))"
+        access_modifier: public_access
+      - name: USABLE_INVENTORY_QTY
+        description: "DOI numerator within one Part: unrestricted + owned in-transit qty at the last snapshot of the period, base UoM. NULL when the group mixes units of measure."
+        expr: |-
+          IFF(COUNT(DISTINCT IFF(inventory.is_doi_population, inventory.BASE_UOM, NULL)) > 1, NULL,
+                       SUM(IFF(inventory.is_doi_population, inventory.usable_qty, NULL)))
+        access_modifier: public_access
+        non_additive_dimensions:
+          - table: INVENTORY
+            dimension: INVENTORY_SNAPSHOT_DATE
+            sort_direction: ascending
+            null_order: last
+      - name: USABLE_INVENTORY_VALUE_AMT
+        description: "DOI numerator above Part level: usable qty x standard cost, USD, at the last snapshot of the period."
+        expr: "SUM(IFF(inventory.is_doi_population, inventory.usable_qty * parts.standard_cost_amt, NULL))"
+        access_modifier: public_access
+        non_additive_dimensions:
+          - table: INVENTORY
+            dimension: INVENTORY_SNAPSHOT_DATE
+            sort_direction: ascending
+            null_order: last
+      - name: WEEKS_OF_SUPPLY
+        synonyms:
+          - weeks of supply
+          - weeks of cover
+        description: Weeks of supply = Days of Inventory / 7 (contract §5).
+        expr: |-
+          (SUM(IFF(inventory.is_doi_population, inventory.usable_qty * parts.standard_cost_amt, NULL))
+                    / NULLIF(SUM(IFF(inventory.is_doi_population, inventory.daily_demand_qty * parts.standard_cost_amt, NULL)), 0) / 7)::NUMBER(18,6)
+        access_modifier: public_access
+        non_additive_dimensions:
+          - table: INVENTORY
+            dimension: INVENTORY_SNAPSHOT_DATE
+            sort_direction: ascending
+            null_order: last
+  - name: ORDER_LINES
+    synonyms:
+      - line
+      - line item
+      - order item
+      - SO line
+      - sales order line
+      - customer order line
+    description: "OrderLine: one Part, quantity and commit date on a customer SalesOrder (header attributes denormalized). Grain of Customer OTD % and Fill Rate %. One row per SO_NO + LINE_NO."
+    base_table:
+      database: SC
+      schema: CONFORMED
+      table: FACT_ORDER_LINE
+    primary_key:
+      columns:
+        - SO_NO
+        - LINE_NO
+    dimensions:
+      - name: IS_DUE_ORDER_LINE
+        description: "TRUE when the line counts in the Customer OTD % / Fill Rate % denominator (population, commit date <= as-of date)."
+        expr: order_lines.is_due_line
+        data_type: BOOLEAN
+        access_modifier: public_access
+      - name: IS_ON_TIME_ORDER_LINE
+        description: "Per due line: TRUE = arrived complete within [commit - 1, commit]; FALSE = late (incl. partial or no arrival evidence); NULL = not a due line."
+        expr: "IFF(order_lines.is_due_line, order_lines.is_on_time_line, NULL)"
+        data_type: BOOLEAN
+        access_modifier: public_access
+      - name: LINE_NO
+        description: Line number on the sales order (natural key part 2).
+        expr: order_lines.LINE_NO
+        data_type: "NUMBER(20,0)"
+        access_modifier: public_access
+      - name: ORDER_LINE_COMMIT_DATE
+        synonyms:
+          - customer commit date
+          - first commit date
+        description: "Commit date (§1.1): first confirmed date, reset only by a customer-requested change. Time anchor of Customer OTD % and Fill Rate %."
+        expr: order_lines.FIRST_COMMIT_DATE
+        data_type: DATE
+        access_modifier: public_access
+      - name: ORDER_LINE_COMPLETE_ARRIVAL_DATE
+        description: Customer-local date the line became complete (cumulative arrived qty >= required qty). NULL while incomplete.
+        expr: order_lines.COMPLETE_ARRIVAL_LOCAL_DATE
+        data_type: DATE
+        access_modifier: public_access
+      - name: ORDER_LINE_HAS_NO_ARRIVAL_EVIDENCE
+        description: "DQ flag NO_ARRIVAL_EVIDENCE: a shipment of the line has no IoT / POD arrival."
+        expr: order_lines.has_arrival_gap
+        data_type: BOOLEAN
+        access_modifier: public_access
+      - name: ORDER_LINE_HAS_SUBSTITUTION
+        description: "DQ flag SUBSTITUTION: a different part was shipped (counts as unfilled)."
+        expr: "ARRAY_CONTAINS('SUBSTITUTION'::VARIANT, order_lines.DQ_FLAGS)"
+        data_type: BOOLEAN
+        access_modifier: public_access
+      - name: ORDER_LINE_HAS_TZ_FALLBACK
+        description: "DQ flag TZ_FALLBACK: customer ship-to time zone unknown, shipping plant zone used."
+        expr: "ARRAY_CONTAINS('TZ_FALLBACK'::VARIANT, order_lines.DQ_FLAGS)"
+        data_type: BOOLEAN
+        access_modifier: public_access
+      - name: ORDER_LINE_REQUESTED_DATE
+        synonyms:
+          - customer requested date
+        description: Date the customer asked for. Not the commit date and not used by any canonical metric.
+        expr: order_lines.REQUESTED_DATE
+        data_type: DATE
+        access_modifier: public_access
+      - name: ORDER_LINE_RESCHEDULE_REASON
+        description: "Reason of the latest reschedule (CUSTOMER_REQUEST, MATERIAL_SHORTAGE, CAPACITY). Only CUSTOMER_REQUEST resets the commit date."
+        expr: order_lines.RESCHEDULE_REASON
+        data_type: VARCHAR(16777216)
+        access_modifier: public_access
+      - name: ORDER_LINE_STATUS
+        description: "ERP line status: OPEN, PARTIALLY_SHIPPED, SHIPPED, DELIVERED, CLOSED_SHORT, CANCELLED, CLOSED."
+        expr: order_lines.LINE_STATUS
+        data_type: VARCHAR(17)
+        access_modifier: public_access
+      - name: ORDER_LINE_TYPE
+        description: "STANDARD, RETURN or FREE_OF_CHARGE. Only STANDARD lines are in the OTD / Fill Rate population."
+        expr: order_lines.LINE_TYPE
+        data_type: VARCHAR(14)
+        access_modifier: public_access
+      - name: SALES_ORDER_DATE
+        description: "Order date of the sales order (Time role: order date, volume reporting)."
+        expr: order_lines.ORDER_DATE
+        data_type: DATE
+        access_modifier: public_access
+      - name: SO_NO
+        synonyms:
+          - sales order number
+          - SO number
+          - customer order number
+        description: Sales order number (natural key part 1).
+        expr: order_lines.SO_NO
+        data_type: VARCHAR(16777216)
+        access_modifier: public_access
+    facts:
+      - name: HAS_ARRIVAL_GAP
+        description: TRUE when at least one shipment of the line has no arrival evidence (NO_ARRIVAL_EVIDENCE).
+        expr: "ARRAY_CONTAINS('NO_ARRIVAL_EVIDENCE'::VARIANT, order_lines.DQ_FLAGS)"
+        data_type: BOOLEAN
+        access_modifier: private_access
+      - name: IS_DUE_LINE
+        description: "Due line: in population, commit date present and on or before the as-of date (CURRENT_DATE). The reporting period comes from the query filter on the commit date. Open lines stay due."
+        expr: |-
+          order_lines.is_otd_population AND order_lines.FIRST_COMMIT_DATE IS NOT NULL
+                   AND order_lines.FIRST_COMMIT_DATE <= CURRENT_DATE()
+        data_type: BOOLEAN
+        access_modifier: private_access
+      - name: IS_NO_COMMIT_LINE
+        description: "Population line without a commit date: excluded from the metrics, counted for the DQ summary (NO_COMMIT)."
+        expr: order_lines.is_otd_population AND order_lines.FIRST_COMMIT_DATE IS NULL
+        data_type: BOOLEAN
+        access_modifier: private_access
+      - name: IS_ON_TIME_LINE
+        description: "On-time window [commit - 1 day, commit], inclusive, on the customer-local complete-arrival date. Incomplete lines (NULL complete-arrival) are late."
+        expr: |-
+          order_lines.is_due_line
+                   AND order_lines.COMPLETE_ARRIVAL_LOCAL_DATE BETWEEN DATEADD(day, -1, order_lines.FIRST_COMMIT_DATE) AND order_lines.FIRST_COMMIT_DATE
+        data_type: BOOLEAN
+        access_modifier: private_access
+      - name: IS_OTD_POPULATION
+        description: "Population of Customer OTD % and Fill Rate % (identical by contract): outbound STANDARD lines; excludes returns (ORDER_QTY <= 0), free-of-charge samples, fully cancelled lines (required qty 0) and intercompany customers."
+        expr: |-
+          order_lines.LINE_TYPE = 'STANDARD' AND order_lines.ORDER_QTY > 0 AND order_lines.REQUIRED_QTY > 0
+                   AND customers.is_intercompany IS DISTINCT FROM TRUE
+        data_type: BOOLEAN
+        access_modifier: private_access
+      - name: LINE_FILLED_QTY
+        description: "Filled qty = MIN(qty of the ordered part arrived with local date <= commit date, required qty). Early arrivals count; over-delivery capped per line; substitutes and lines without arrival evidence contribute 0."
+        expr: "LEAST(COALESCE(order_lines.ARRIVED_BY_COMMIT_QTY, 0), order_lines.REQUIRED_QTY)"
+        data_type: "NUMBER(18,3)"
+        access_modifier: private_access
+      - name: LINE_REQUIRED_QTY
+        description: Required qty (§1.1) in base UoM.
+        expr: order_lines.REQUIRED_QTY
+        data_type: "NUMBER(18,3)"
+        access_modifier: private_access
+    metrics:
+      - name: CUSTOMER_OTD_PCT
+        synonyms:
+          - on-time delivery
+          - OTD
+          - OTD %
+          - on-time
+          - customer on-time delivery
+          - outbound OTD
+          - on-time to commit
+          - delivery reliability
+          - line-level OTIF
+        description: "Customer OTD % (contract v1.2 §2): share of due customer order lines that arrived complete within [commit - 1 day, commit] of the first commit date. = ON_TIME_LINES / DUE_LINES, 0-1 fraction, NULL when no due lines. Default meaning of unqualified on-time delivery / OTD. Partial = late, so this is line-level OTIF. Publish with OUTBOUND_ARRIVAL_EVIDENCE_COVERAGE_PCT."
+        expr: "(COUNT_IF(order_lines.is_on_time_line) / NULLIF(COUNT_IF(order_lines.is_due_line), 0))::NUMBER(9,6)"
+        access_modifier: public_access
+      - name: DUE_LINES
+        description: "Customer OTD % denominator: order lines in population with commit date in the period and <= as-of date, including open lines."
+        expr: COUNT_IF(order_lines.is_due_line)
+        access_modifier: public_access
+      - name: DUE_LINES_FIRST_COMMIT_DATE
+        description: "Data range start (contract v1.3.1 section 7.1) of Customer OTD % and Fill Rate %: earliest commit date among the due lines in the query scope. Return it with every no-period answer."
+        expr: "MIN(IFF(order_lines.is_due_line, order_lines.FIRST_COMMIT_DATE, NULL))"
+        access_modifier: public_access
+      - name: DUE_LINES_LAST_COMMIT_DATE
+        description: "Data range end of Customer OTD % and Fill Rate %: latest commit date among the due lines in the query scope (never after today)."
+        expr: "MAX(IFF(order_lines.is_due_line, order_lines.FIRST_COMMIT_DATE, NULL))"
+        access_modifier: public_access
+      - name: FILL_RATE_FILLED_QTY
+        description: "Fill Rate % numerator: sum over due lines of MIN(qty arrived by commit date, required qty), base UoM."
+        expr: "SUM(IFF(order_lines.is_due_line, order_lines.line_filled_qty, NULL))"
+        access_modifier: public_access
+      - name: FILL_RATE_PCT
+        synonyms:
+          - fill rate
+          - unit fill rate
+          - customer fill rate
+          - demand fill rate
+          - quantity fill rate
+        description: "Fill Rate % (contract v1.2 §4): share of required qty that reached the customer by the commit date = FILL_RATE_FILLED_QTY / FILL_RATE_REQUIRED_QTY over due lines (same population as Customer OTD %), 0-1 fraction, NULL when empty. Per line filled = MIN(arrived by commit, required); early arrivals count, substitutes do not. Not trailer utilization."
+        expr: |-
+          (SUM(IFF(order_lines.is_due_line, order_lines.line_filled_qty, NULL))
+                    / NULLIF(SUM(IFF(order_lines.is_due_line, order_lines.line_required_qty, NULL)), 0))::NUMBER(9,6)
+        access_modifier: public_access
+      - name: FILL_RATE_REQUIRED_QTY
+        description: "Fill Rate % denominator: sum of required qty (ordered - customer-cancelled) over due lines, base UoM."
+        expr: "SUM(IFF(order_lines.is_due_line, order_lines.line_required_qty, NULL))"
+        access_modifier: public_access
+      - name: NO_ARRIVAL_EVIDENCE_LINES
+        description: "Due lines flagged NO_ARRIVAL_EVIDENCE (kept in the denominator, never on time, filled qty 0)."
+        expr: COUNT_IF(order_lines.is_due_line AND order_lines.has_arrival_gap)
+        access_modifier: public_access
+      - name: NO_COMMIT_LINES
+        description: "Population lines excluded because they have no commit date (NO_COMMIT, DQ summary)."
+        expr: COUNT_IF(order_lines.is_no_commit_line)
+        access_modifier: public_access
+      - name: ON_TIME_LINES
+        description: "Customer OTD % numerator: due order lines arrived complete within the on-time window."
+        expr: COUNT_IF(order_lines.is_on_time_line)
+        access_modifier: public_access
+      - name: OUTBOUND_ARRIVAL_EVIDENCE_COVERAGE_PCT
+        description: "Evidence coverage of Customer OTD % and Fill Rate % (same population): share of due lines not flagged NO_ARRIVAL_EVIDENCE. 0-1 fraction."
+        expr: "(COUNT_IF(order_lines.is_due_line AND NOT order_lines.has_arrival_gap) / NULLIF(COUNT_IF(order_lines.is_due_line), 0))::NUMBER(9,6)"
+        access_modifier: public_access
+  - name: PARTS
+    synonyms:
+      - SKU
+      - material
+      - item
+      - product
+      - component
+      - article
+    description: "Part: item we buy, make, stock or sell, in its base unit of measure. Part hierarchy Category > Family > SKU."
+    base_table:
+      database: SC
+      schema: CONFORMED
+      table: DIM_PART
+    primary_key:
+      columns:
+        - PART_NO
+    dimensions:
+      - name: IS_STOCKED
+        description: "TRUE for stocked parts; non-stock / expense parts are excluded from DOI, Supplier OTD and Landed Cost."
+        expr: parts.IS_STOCKED
+        data_type: BOOLEAN
+        access_modifier: public_access
+      - name: PART_BASE_UOM
+        description: "Base unit of measure (EA, L)."
+        expr: parts.BASE_UOM
+        data_type: VARCHAR(16777216)
+        access_modifier: public_access
+      - name: PART_CATEGORY
+        synonyms:
+          - category
+          - product category
+          - material group
+        description: "Part hierarchy level 1 (top). UNMAPPED PART = PO lines / receipts whose supplier part number maps to no ERP part (excluded from Landed Cost per Unit / Uplift %, counted in LANDED_COST_UNMAPPED_PART_RECEIPTS)."
+        expr: parts.CATEGORY
+        data_type: VARCHAR(13)
+        access_modifier: public_access
+      - name: PART_DESCRIPTION
+        description: Material description.
+        expr: parts.DESCRIPTION
+        data_type: VARCHAR(16777216)
+        access_modifier: public_access
+      - name: PART_FAMILY
+        synonyms:
+          - product family
+        description: "Part hierarchy level 2. Parent: part_category."
+        expr: parts.FAMILY
+        data_type: VARCHAR(13)
+        access_modifier: public_access
+      - name: PART_NO
+        synonyms:
+          - SKU
+          - material number
+          - part number
+          - item number
+        description: "Part hierarchy level 3 (leaf, SKU). Parent: part_family."
+        expr: parts.PART_NO
+        data_type: VARCHAR(16777216)
+        access_modifier: public_access
+    facts:
+      - name: STANDARD_COST_AMT
+        description: "ERP standard cost per base UoM, USD. Weight for DOI above Part level."
+        expr: parts.STANDARD_COST_AMT
+        data_type: "NUMBER(12,2)"
+        access_modifier: private_access
+  - name: PLANTS
+    synonyms:
+      - site
+      - facility
+      - factory
+      - location
+    description: "Plant: physical company site that makes, receives or ships goods. Geography hierarchy Region > Country > Plant."
+    base_table:
+      database: SC
+      schema: CONFORMED
+      table: DIM_PLANT
+    primary_key:
+      columns:
+        - PLANT_CODE
+    dimensions:
+      - name: PLANT_CITY
+        description: City of the plant.
+        expr: plants.CITY
+        data_type: VARCHAR(16777216)
+        access_modifier: public_access
+      - name: PLANT_CODE
+        synonyms:
+          - plant
+          - site code
+        description: "Geography hierarchy level 3 (leaf). Parent: plant_country."
+        expr: plants.PLANT_CODE
+        data_type: VARCHAR(16777216)
+        access_modifier: public_access
+      - name: PLANT_COUNTRY
+        synonyms:
+          - country
+        description: "Geography hierarchy level 2 (ISO 3166-1 alpha-2). Parent: plant_region."
+        expr: plants.COUNTRY_CODE
+        data_type: VARCHAR(16777216)
+        access_modifier: public_access
+      - name: PLANT_NAME
+        synonyms:
+          - site name
+          - facility name
+        description: "Plant name, e.g. Pune Assembly."
+        expr: plants.PLANT_NAME
+        data_type: VARCHAR(16777216)
+        access_modifier: public_access
+      - name: PLANT_REGION
+        synonyms:
+          - region
+          - geography
+        description: "Geography hierarchy level 1: AMER (shown as NA), EMEA, APAC. Default meaning of \"region\"."
+        expr: plants.REGION
+        data_type: VARCHAR(16777216)
+        access_modifier: public_access
+      - name: PLANT_TYPE
+        description: MANUFACTURING or DISTRIBUTION.
+        expr: plants.PLANT_TYPE
+        data_type: VARCHAR(16777216)
+        access_modifier: public_access
+  - name: PURCHASE_ORDER_LINES
+    synonyms:
+      - PO
+      - purchase order
+      - buy order
+      - release
+      - PO line
+    description: "PurchaseOrderLine: one supplier part, quantity and supplier commit date on a PurchaseOrder. Grain of Supplier OTD %. One row per PO_NO + PO_LINE_NO."
+    base_table:
+      database: SC
+      schema: CONFORMED
+      table: FACT_PO_LINE
+    primary_key:
+      columns:
+        - PO_NO
+        - PO_LINE_NO
+    dimensions:
+      - name: IS_CONTRACTUAL_ON_TIME_PO_LINE_FLAG
+        description: "Per contractual due PO line: TRUE = complete by latest confirmed date + grace days; FALSE = late; NULL = not in the contractual population."
+        expr: "IFF(purchase_order_lines.is_contractual_due_po_line, purchase_order_lines.is_contractual_on_time_po_line, NULL)"
+        data_type: BOOLEAN
+        access_modifier: public_access
+      - name: IS_DUE_PO_LINE_FLAG
+        description: TRUE when the PO line counts in the Supplier OTD % denominator.
+        expr: purchase_order_lines.is_due_po_line
+        data_type: BOOLEAN
+        access_modifier: public_access
+      - name: IS_ON_TIME_PO_LINE_FLAG
+        description: "Per due PO line: TRUE = arrived complete within [commit - 1, commit]; FALSE = late; NULL = not due."
+        expr: "IFF(purchase_order_lines.is_due_po_line, purchase_order_lines.is_on_time_po_line, NULL)"
+        data_type: BOOLEAN
+        access_modifier: public_access
+      - name: PO_CONTRACT_NO
+        synonyms:
+          - governing contract
+        description: "Governing contract of the PO line (via its supplier part, R6); NULL = no contract."
+        expr: purchase_order_lines.CONTRACT_NO
+        data_type: VARCHAR(16777216)
+        access_modifier: public_access
+      - name: PO_DATE
+        description: "PO order date (Time role: order date)."
+        expr: purchase_order_lines.PO_DATE
+        data_type: DATE
+        access_modifier: public_access
+      - name: PO_INCOTERM
+        description: "Incoterm of the PO line (EXW, FCA, FOB, CIF, DAP, DDP)."
+        expr: purchase_order_lines.INCOTERM
+        data_type: VARCHAR(3)
+        access_modifier: public_access
+      - name: PO_ITEM_CATEGORY
+        description: "STOCK, NON_STOCK or SERVICE. Only STOCK lines are in the Supplier OTD / Landed Cost population."
+        expr: purchase_order_lines.ITEM_CATEGORY
+        data_type: VARCHAR(9)
+        access_modifier: public_access
+      - name: PO_LINE_COMMIT_DATE
+        synonyms:
+          - supplier commit date
+          - supplier first confirmed date
+        description: "Supplier commit date (§1.1): first supplier confirmation, reset only by a buyer-requested change; PO due date when never confirmed (UNCONFIRMED). Time anchor of Supplier OTD %."
+        expr: purchase_order_lines.FIRST_COMMIT_DATE
+        data_type: DATE
+        access_modifier: public_access
+      - name: PO_LINE_COMPLETE_ARRIVAL_DATE
+        description: "Plant-local date the PO line became complete (arrival from IoT geofence, then carrier POD, else GR posting date = GR_FALLBACK). NULL while incomplete."
+        expr: purchase_order_lines.COMPLETE_ARRIVAL_LOCAL_DATE
+        data_type: DATE
+        access_modifier: public_access
+      - name: PO_LINE_COMPLETE_ARRIVAL_SOURCE
+        synonyms:
+          - inbound arrival source
+          - arrival evidence source
+        description: "Arrival evidence of the ASN that completed the PO line: IOT_GEOFENCE, CARRIER_POD or GR_POSTING (GR_FALLBACK, lower confidence). NULL while incomplete."
+        expr: purchase_order_lines.COMPLETE_ARRIVAL_SOURCE
+        data_type: VARCHAR(16777216)
+        access_modifier: public_access
+      - name: PO_LINE_CONTRACT_GRACE_DAYS
+        description: Late-delivery grace days of the governing contract.
+        expr: purchase_order_lines.CONTRACT_LATE_GRACE_DAYS
+        data_type: "NUMBER(38,0)"
+        access_modifier: public_access
+      - name: PO_LINE_IS_IN_CONTRACT_VALIDITY
+        synonyms:
+          - in contract validity
+          - strict contract view
+        description: TRUE = PO ordered inside the contract validity; FALSE = pro-forma. Filter TRUE only when the user asks for the strict / in-validity view.
+        expr: purchase_order_lines.is_in_contract_validity
+        data_type: BOOLEAN
+        access_modifier: public_access
+      - name: PO_LINE_IS_UNCONFIRMED
+        description: "DQ flag UNCONFIRMED: supplier never confirmed; commit = PO due date."
+        expr: purchase_order_lines.IS_UNCONFIRMED
+        data_type: BOOLEAN
+        access_modifier: public_access
+      - name: PO_LINE_LATEST_CONFIRMED_DATE
+        synonyms:
+          - latest confirmed date
+          - supplier latest confirmed date
+        description: Latest supplier-confirmed date (PO due date if never confirmed). Time anchor of Supplier Contractual OTD % only; Supplier OTD % uses po_line_commit_date.
+        expr: purchase_order_lines.contract_due_date_key
+        data_type: DATE
+        access_modifier: public_access
+      - name: PO_LINE_NO
+        description: PO line number (natural key part 2).
+        expr: purchase_order_lines.PO_LINE_NO
+        data_type: "NUMBER(20,0)"
+        access_modifier: public_access
+      - name: PO_NO
+        synonyms:
+          - PO number
+          - purchase order number
+        description: Purchase order number (natural key part 1).
+        expr: purchase_order_lines.PO_NO
+        data_type: VARCHAR(16777216)
+        access_modifier: public_access
+    facts:
+      - name: CONTRACT_DUE_DATE_KEY
+        description: "Time anchor of Supplier Contractual OTD % (v1.4 §3.1): latest supplier-confirmed date; PO due date when never confirmed. Join key of the latest-confirmed-date role on dates."
+        expr: "COALESCE(purchase_order_lines.LATEST_CONFIRMED_DATE, purchase_order_lines.DUE_DATE)"
+        data_type: DATE
+        access_modifier: private_access
+      - name: HAS_NO_ARRIVAL_EVIDENCE
+        description: TRUE when the PO line is flagged NO_ARRIVAL_EVIDENCE. GR posting fallback counts as evidence (v1.2).
+        expr: "ARRAY_CONTAINS('NO_ARRIVAL_EVIDENCE'::VARIANT, purchase_order_lines.DQ_FLAGS)"
+        data_type: BOOLEAN
+        access_modifier: private_access
+      - name: IS_CONTRACTUAL_DUE_PO_LINE
+        description: "Contractual due PO line: in population and latest confirmed date on or before the as-of date. Open lines stay due."
+        expr: purchase_order_lines.is_contractual_population AND purchase_order_lines.contract_due_date_key <= CURRENT_DATE()
+        data_type: BOOLEAN
+        access_modifier: private_access
+      - name: IS_CONTRACTUAL_ON_TIME_PO_LINE
+        description: "Contractual on time (v1.4 §3.1): full required qty arrived (plant-local complete-arrival date) on or before latest confirmed date + the contract's grace days. Early arrivals are on time; incomplete lines (no complete-arrival date) are FALSE = late, never NULL."
+        expr: |-
+          purchase_order_lines.is_contractual_due_po_line
+                   AND COALESCE(purchase_order_lines.COMPLETE_ARRIVAL_LOCAL_DATE <= DATEADD(day, purchase_order_lines.CONTRACT_LATE_GRACE_DAYS, purchase_order_lines.contract_due_date_key), FALSE)
+        data_type: BOOLEAN
+        access_modifier: private_access
+      - name: IS_CONTRACTUAL_POPULATION
+        description: "Population of Supplier Contractual OTD %: the Supplier OTD % population restricted to PO lines with a governing contract. All of them, in or out of contract validity (pro-forma, v1.4)."
+        expr: purchase_order_lines.is_supplier_otd_population AND purchase_order_lines.CONTRACT_NO IS NOT NULL
+        data_type: BOOLEAN
+        access_modifier: private_access
+      - name: IS_DUE_PO_LINE
+        description: "Due PO line: in population and supplier commit date on or before the as-of date. Open lines stay due."
+        expr: purchase_order_lines.is_supplier_otd_population AND purchase_order_lines.FIRST_COMMIT_DATE <= CURRENT_DATE()
+        data_type: BOOLEAN
+        access_modifier: private_access
+      - name: IS_GR_FALLBACK
+        description: TRUE when an arrival of the PO line comes from the ERP goods-receipt posting date because the ASN has no IoT geofence or carrier POD (GR_FALLBACK).
+        expr: "ARRAY_CONTAINS('GR_FALLBACK'::VARIANT, purchase_order_lines.DQ_FLAGS)"
+        data_type: BOOLEAN
+        access_modifier: private_access
+      - name: IS_IN_CONTRACT_VALIDITY
+        description: TRUE when the PO was ordered inside the governing contract's validity; FALSE = pro-forma (contract terms applied to an earlier PO line).
+        expr: purchase_order_lines.PO_DATE BETWEEN purchase_order_lines.CONTRACT_VALID_FROM AND purchase_order_lines.CONTRACT_VALID_TO
+        data_type: BOOLEAN
+        access_modifier: private_access
+      - name: IS_ON_TIME_PO_LINE
+        description: "On-time window [commit - 1 day, commit] on the plant-local complete-arrival date. Under-delivered (incomplete) lines are late."
+        expr: |-
+          purchase_order_lines.is_due_po_line
+                   AND purchase_order_lines.COMPLETE_ARRIVAL_LOCAL_DATE BETWEEN DATEADD(day, -1, purchase_order_lines.FIRST_COMMIT_DATE) AND purchase_order_lines.FIRST_COMMIT_DATE
+        data_type: BOOLEAN
+        access_modifier: private_access
+      - name: IS_STOCK_PART_LINE
+        description: "PO line for a stocked part: STOCK item category and the part is not flagged non-stock in the material master. Unmapped supplier parts (UNMAPPED_PART) are kept."
+        expr: purchase_order_lines.ITEM_CATEGORY = 'STOCK' AND parts.is_stocked IS DISTINCT FROM FALSE
+        data_type: BOOLEAN
+        access_modifier: private_access
+      - name: IS_SUPPLIER_OTD_POPULATION
+        description: "Population of Supplier OTD %: stocked-part PO lines from external suppliers; excludes service / non-stock lines and fully cancelled lines. No intercompany POs or returns to vendor exist in CONFORMED."
+        expr: purchase_order_lines.is_stock_part_line AND purchase_order_lines.REQUIRED_QTY > 0
+        data_type: BOOLEAN
+        access_modifier: private_access
+      - name: IS_UNMAPPED_STOCK_LINE
+        description: Stock PO line whose supplier part number maps to no ERP part (UNMAPPED_PART).
+        expr: purchase_order_lines.is_stock_part_line AND purchase_order_lines.PART_NO IS NULL
+        data_type: BOOLEAN
+        access_modifier: private_access
+      - name: PART_JOIN_KEY
+        description: "Join key to parts: PART_NO, or the unknown member #UNMAPPED (category UNMAPPED PART) when the supplier part number maps to no ERP part, so unmapped lines and receipts show under a label instead of a blank row. PART_NO itself stays NULL."
+        expr: "COALESCE(purchase_order_lines.PART_NO, '#UNMAPPED')"
+        data_type: VARCHAR(16777216)
+        access_modifier: private_access
+    metrics:
+      - name: CONTRACTED_DELIVERY_TARGET
+        synonyms:
+          - contracted delivery target
+          - contracted OTD target
+        description: Contracted delivery target (0-1 fraction) of the one contract in scope; NULL when the scope spans several contracts (group by supplier or contract).
+        expr: |-
+          IFF(COUNT(DISTINCT IFF(purchase_order_lines.is_contractual_due_po_line, purchase_order_lines.CONTRACT_NO, NULL)) = 1,
+                       MAX(IFF(purchase_order_lines.is_contractual_due_po_line, purchase_order_lines.CONTRACT_DELIVERY_TARGET_FRACTION, NULL)), NULL)::NUMBER(9,6)
+        access_modifier: public_access
+        using_relationships:
+          - PO_LINE_TO_LATEST_CONFIRMED_DATE
+      - name: CONTRACTUAL_DUE_PO_LINES
+        description: "Supplier Contractual OTD % denominator: contracted-supplier PO lines in population with latest confirmed date in the period and <= as-of date, including open lines."
+        expr: COUNT_IF(purchase_order_lines.is_contractual_due_po_line)
+        access_modifier: public_access
+        using_relationships:
+          - PO_LINE_TO_LATEST_CONFIRMED_DATE
+      - name: CONTRACTUAL_DUE_PO_LINES_FIRST_DATE
+        description: "Data range start of Supplier Contractual OTD %: earliest latest-confirmed date among the contractual due PO lines in scope."
+        expr: "MIN(IFF(purchase_order_lines.is_contractual_due_po_line, purchase_order_lines.contract_due_date_key, NULL))"
+        access_modifier: public_access
+        using_relationships:
+          - PO_LINE_TO_LATEST_CONFIRMED_DATE
+      - name: CONTRACTUAL_DUE_PO_LINES_LAST_DATE
+        description: "Data range end of Supplier Contractual OTD %: latest latest-confirmed date among the contractual due PO lines in scope."
+        expr: "MAX(IFF(purchase_order_lines.is_contractual_due_po_line, purchase_order_lines.contract_due_date_key, NULL))"
+        access_modifier: public_access
+        using_relationships:
+          - PO_LINE_TO_LATEST_CONFIRMED_DATE
+      - name: CONTRACTUAL_ON_TIME_PO_LINES
+        description: "Supplier Contractual OTD % numerator: contractual due PO lines complete by latest confirmed date + grace days."
+        expr: COUNT_IF(purchase_order_lines.is_contractual_on_time_po_line)
+        access_modifier: public_access
+        using_relationships:
+          - PO_LINE_TO_LATEST_CONFIRMED_DATE
+      - name: CONTRACTUAL_OTD_EVIDENCE_COVERAGE_PCT
+        description: "Evidence coverage of Supplier Contractual OTD % (§1.3): share of contractual due PO lines not flagged NO_ARRIVAL_EVIDENCE (GR fallback counts as evidence). 0-1 fraction."
+        expr: |-
+          (COUNT_IF(purchase_order_lines.is_contractual_due_po_line AND NOT purchase_order_lines.has_no_arrival_evidence)
+                    / NULLIF(COUNT_IF(purchase_order_lines.is_contractual_due_po_line), 0))::NUMBER(9,6)
+        access_modifier: public_access
+        using_relationships:
+          - PO_LINE_TO_LATEST_CONFIRMED_DATE
+      - name: CONTRACTUAL_PRO_FORMA_PO_LINES
+        description: "Contractual due PO lines ordered before the contract became valid (pro-forma). When > 0 the answer must say: \"pro-forma: contract terms (effective <CONTRACT_EFFECTIVE_DATE>) applied to earlier PO lines\"."
+        expr: COUNT_IF(purchase_order_lines.is_contractual_due_po_line AND NOT purchase_order_lines.is_in_contract_validity)
+        access_modifier: public_access
+        using_relationships:
+          - PO_LINE_TO_LATEST_CONFIRMED_DATE
+      - name: CONTRACT_EFFECTIVE_DATE
+        description: Earliest contract valid-from date among the contractual due PO lines in scope; quote it in the pro-forma label.
+        expr: "MIN(IFF(purchase_order_lines.is_contractual_due_po_line, purchase_order_lines.CONTRACT_VALID_FROM, NULL))"
+        access_modifier: public_access
+        using_relationships:
+          - PO_LINE_TO_LATEST_CONFIRMED_DATE
+      - name: DUE_PO_LINES
+        description: "Supplier OTD % denominator: PO lines in population with supplier commit date in the period and <= as-of date, including open lines."
+        expr: COUNT_IF(purchase_order_lines.is_due_po_line)
+        access_modifier: public_access
+        using_relationships:
+          - PO_LINE_TO_COMMIT_DATE
+      - name: DUE_PO_LINES_FIRST_COMMIT_DATE
+        description: "Data range start (contract v1.3.1 section 7.1) of Supplier OTD %: earliest supplier commit date among the due PO lines in the query scope. Return it with every no-period answer."
+        expr: "MIN(IFF(purchase_order_lines.is_due_po_line, purchase_order_lines.FIRST_COMMIT_DATE, NULL))"
+        access_modifier: public_access
+        using_relationships:
+          - PO_LINE_TO_COMMIT_DATE
+      - name: DUE_PO_LINES_LAST_COMMIT_DATE
+        description: "Data range end of Supplier OTD %: latest supplier commit date among the due PO lines in the query scope (never after today)."
+        expr: "MAX(IFF(purchase_order_lines.is_due_po_line, purchase_order_lines.FIRST_COMMIT_DATE, NULL))"
+        access_modifier: public_access
+        using_relationships:
+          - PO_LINE_TO_COMMIT_DATE
+      - name: ON_TIME_PO_LINES
+        description: "Supplier OTD % numerator: due PO lines arrived complete within the on-time window."
+        expr: COUNT_IF(purchase_order_lines.is_on_time_po_line)
+        access_modifier: public_access
+        using_relationships:
+          - PO_LINE_TO_COMMIT_DATE
+      - name: SUPPLIER_CONTRACTUAL_OTD_GAP
+        synonyms:
+          - below contracted target
+          - gap to contracted target
+          - contractual OTD gap
+          - OTD gap vs contract target
+        description: "Supplier Contractual OTD Gap (contract v1.4 §3.1) = SUPPLIER_CONTRACTUAL_OTD_PCT - CONTRACTED_DELIVERY_TARGET, as a 0-1 fraction (x 100 = percentage points). Negative = below the contracted target. Defined within one contract: NULL when the scope spans several contracts, so group by supplier or contract."
+        expr: |-
+          IFF(COUNT(DISTINCT IFF(purchase_order_lines.is_contractual_due_po_line, purchase_order_lines.CONTRACT_NO, NULL)) = 1,
+                       COUNT_IF(purchase_order_lines.is_contractual_on_time_po_line) / NULLIF(COUNT_IF(purchase_order_lines.is_contractual_due_po_line), 0)
+                       - MAX(IFF(purchase_order_lines.is_contractual_due_po_line, purchase_order_lines.CONTRACT_DELIVERY_TARGET_FRACTION, NULL)), NULL)::NUMBER(9,6)
+        access_modifier: public_access
+        using_relationships:
+          - PO_LINE_TO_LATEST_CONFIRMED_DATE
+      - name: SUPPLIER_CONTRACTUAL_OTD_PCT
+        synonyms:
+          - contractual OTD
+          - OTD vs contract
+          - supplier contractual OTD
+          - contractual on-time delivery
+          - on-time vs contract
+        description: "Supplier Contractual OTD % (contract v1.4 §3.1, a named variant, NOT canonical): share of contracted-supplier PO lines whose full qty arrived on or before the latest confirmed date + the contract grace days (early = on time). = CONTRACTUAL_ON_TIME_PO_LINES / CONTRACTUAL_DUE_PO_LINES, 0-1 fraction, NULL when empty. Calendar months on the latest confirmed date. Only for \"contractual OTD\", \"OTD vs contract\" or \"below contracted target\" questions; never for plain OTD or supplier OTD."
+        expr: "(COUNT_IF(purchase_order_lines.is_contractual_on_time_po_line) / NULLIF(COUNT_IF(purchase_order_lines.is_contractual_due_po_line), 0))::NUMBER(9,6)"
+        access_modifier: public_access
+        using_relationships:
+          - PO_LINE_TO_LATEST_CONFIRMED_DATE
+      - name: SUPPLIER_OTD_EVIDENCE_COVERAGE_PCT
+        description: "Evidence coverage of Supplier OTD % (contract v1.2 §1.3): share of due PO lines not flagged NO_ARRIVAL_EVIDENCE. GR posting fallback counts as evidence. 0-1 fraction."
+        expr: |-
+          (COUNT_IF(purchase_order_lines.is_due_po_line AND NOT purchase_order_lines.has_no_arrival_evidence)
+                    / NULLIF(COUNT_IF(purchase_order_lines.is_due_po_line), 0))::NUMBER(9,6)
+        access_modifier: public_access
+        using_relationships:
+          - PO_LINE_TO_COMMIT_DATE
+      - name: SUPPLIER_OTD_GR_FALLBACK_PCT
+        description: "GR-fallback share of Supplier OTD % (contract v1.2 §3): due PO lines whose arrival is the ERP GR posting date (GR_FALLBACK, can understate OTD by 1-2 days) / due PO lines. 0-1 fraction."
+        expr: |-
+          (COUNT_IF(purchase_order_lines.is_due_po_line AND purchase_order_lines.is_gr_fallback)
+                    / NULLIF(COUNT_IF(purchase_order_lines.is_due_po_line), 0))::NUMBER(9,6)
+        access_modifier: public_access
+        using_relationships:
+          - PO_LINE_TO_COMMIT_DATE
+      - name: SUPPLIER_OTD_PCT
+        synonyms:
+          - supplier OTD
+          - vendor OTD
+          - vendor on-time delivery
+          - inbound OTD
+          - supplier on-time
+          - supplier delivery performance
+          - supplier line-level OTIF
+        description: "Supplier OTD % (contract v1.2 §3): share of due PO lines that arrived complete at the receiving plant within [commit - 1 day, commit] of the first supplier confirmation. = ON_TIME_PO_LINES / DUE_PO_LINES, 0-1 fraction, NULL when empty. Arrival per ASN = IoT geofence entry, then carrier POD, else GR posting date (GR_FALLBACK, lower confidence: GR lags arrival by 0-5 days and can understate OTD). Only for explicit supplier / vendor / inbound questions. Publish with SUPPLIER_OTD_EVIDENCE_COVERAGE_PCT and SUPPLIER_OTD_GR_FALLBACK_PCT."
+        expr: "(COUNT_IF(purchase_order_lines.is_on_time_po_line) / NULLIF(COUNT_IF(purchase_order_lines.is_due_po_line), 0))::NUMBER(9,6)"
+        access_modifier: public_access
+        using_relationships:
+          - PO_LINE_TO_COMMIT_DATE
+      - name: UNMAPPED_PART_PO_LINES
+        description: Stock PO lines whose supplier part number maps to no ERP part (UNMAPPED_PART). Kept in Supplier OTD %; excluded from Landed Cost per Unit / Uplift % and counted against their evidence coverage.
+        expr: COUNT_IF(purchase_order_lines.is_unmapped_stock_line)
+        access_modifier: public_access
+        using_relationships:
+          - PO_LINE_TO_COMMIT_DATE
+  - name: SHIPMENTS
+    synonyms:
+      - load
+      - consignment
+      - freight
+      - BOL
+    description: "Shipment: physical movement of (part of) one OrderLine by one Carrier, with arrival evidence. Outbound only. Grain shipment x order line."
+    base_table:
+      database: SC
+      schema: CONFORMED
+      table: FACT_SHIPMENT
+    primary_key:
+      columns:
+        - SHIPMENT_NO
+        - SO_NO
+        - LINE_NO
+    dimensions:
+      - name: SCAC
+        synonyms:
+          - carrier code
+          - carrier SCAC
+          - carrier
+        description: Standard Carrier Alpha Code of the carrier that moved the shipment (plain attribute; no carrier table in this view).
+        expr: shipments.SCAC
+        data_type: VARCHAR(4)
+        access_modifier: public_access
+      - name: SHIPMENT_ARRIVAL_DATE
+        description: Arrival date in the customer ship-to time zone.
+        expr: shipments.ARRIVAL_LOCAL_DATE
+        data_type: DATE
+        access_modifier: public_access
+      - name: SHIPMENT_ARRIVAL_SOURCE
+        description: "Arrival evidence used: IOT_GEOFENCE, CARRIER_POD, or NULL when there is no evidence."
+        expr: shipments.ARRIVAL_SOURCE
+        data_type: VARCHAR(16777216)
+        access_modifier: public_access
+      - name: SHIPMENT_GOODS_ISSUE_DATE
+        description: "ERP goods-issue (ship) date, plant-local."
+        expr: shipments.GOODS_ISSUE_DATE
+        data_type: DATE
+        access_modifier: public_access
+      - name: SHIPMENT_IS_SUBSTITUTION
+        description: TRUE when a different part than ordered was shipped.
+        expr: shipments.IS_SUBSTITUTION
+        data_type: BOOLEAN
+        access_modifier: public_access
+      - name: SHIPMENT_NO
+        synonyms:
+          - shipment number
+          - load number
+        description: TMS shipment id.
+        expr: shipments.SHIPMENT_NO
+        data_type: VARCHAR(16777216)
+        access_modifier: public_access
+    metrics:
+      - name: SHIPMENTS_FIRST_GOODS_ISSUE_DATE
+        description: "Data range start (contract v1.3.1 section 7.1) of the shipment volumes: earliest goods-issue date in scope."
+        expr: MIN(shipments.GOODS_ISSUE_DATE)
+        access_modifier: public_access
+      - name: SHIPMENTS_LAST_GOODS_ISSUE_DATE
+        description: "Data range end of the shipment volumes: latest goods-issue date in scope."
+        expr: MAX(shipments.GOODS_ISSUE_DATE)
+        access_modifier: public_access
+      - name: SHIPMENT_COUNT
+        description: Number of outbound shipment rows (shipment x order line). Volume only; carrier on-time is not a canonical metric.
+        expr: COUNT(shipments.SHIPMENT_NO)
+        access_modifier: public_access
+      - name: TOTAL_SHIPPED_QTY
+        description: "Shipped qty, base UoM (meaningful within one Part)."
+        expr: SUM(shipments.SHIPPED_QTY)
+        access_modifier: public_access
+  - name: SUPPLIERS
+    synonyms:
+      - vendor
+      - seller
+      - source
+      - manufacturer
+      - provider
+    description: "Supplier: legal entity we buy parts or materials from. Natural key SUPPLIER_NO (ERP vendor number)."
+    base_table:
+      database: SC
+      schema: CONFORMED
+      table: DIM_SUPPLIER
+    primary_key:
+      columns:
+        - SUPPLIER_NO
+    dimensions:
+      - name: SUPPLIER_COUNTRY
+        description: ISO country of the supplier.
+        expr: suppliers.COUNTRY_CODE
+        data_type: VARCHAR(2)
+        access_modifier: public_access
+      - name: SUPPLIER_NAME
+        synonyms:
+          - vendor name
+          - supplier
+        description: Supplier legal name.
+        expr: suppliers.SUPPLIER_NAME
+        data_type: VARCHAR(20)
+        access_modifier: public_access
+      - name: SUPPLIER_NO
+        synonyms:
+          - vendor number
+          - supplier number
+        description: Supplier natural key (ERP vendor number).
+        expr: suppliers.SUPPLIER_NO
+        data_type: VARCHAR(16777216)
+        access_modifier: public_access
+      - name: SUPPLIER_REGION
+        synonyms:
+          - vendor region
+        description: Company region of the supplier (NA = Americas).
+        expr: suppliers.REGION
+        data_type: VARCHAR(4)
+        access_modifier: public_access
+  - name: SUPPLIER_PARTS
+    synonyms:
+      - vendor item
+      - approved vendor part
+      - source of supply
+      - catalog item
+    description: "SupplierPart: a Supplier approved to supply a Part, with its quoted lead time, MOQ, price and governing contract (NULL = spot buy). One row per SUPPLIER_NO x SUPPLIER_PART_NO."
+    base_table:
+      database: SC
+      schema: CONFORMED
+      table: DIM_SUPPLIER_PART
+    primary_key:
+      columns:
+        - SUPPLIER_NO
+        - SUPPLIER_PART_NO
+    dimensions:
+      - name: SUPPLIER_PART_CONTRACT_NO
+        description: "Governing contract (R6); NULL = spot buy, no contract."
+        expr: supplier_parts.CONTRACT_NO
+        data_type: VARCHAR(16777216)
+        access_modifier: public_access
+      - name: SUPPLIER_PART_IS_PREFERRED
+        description: TRUE for the preferred (rank 1) source of the part.
+        expr: supplier_parts.IS_PREFERRED
+        data_type: BOOLEAN
+        access_modifier: public_access
+      - name: SUPPLIER_PART_LEAD_TIME_DAYS
+        synonyms:
+          - quoted lead time
+        description: Lead time quoted by the supplier for this part (can differ from the contracted lead time).
+        expr: supplier_parts.LEAD_TIME_DAYS
+        data_type: "NUMBER(2,0)"
+        access_modifier: public_access
+      - name: SUPPLIER_PART_MOQ
+        description: Minimum order quantity in base UoM.
+        expr: supplier_parts.MOQ
+        data_type: "NUMBER(38,0)"
+        access_modifier: public_access
+      - name: SUPPLIER_PART_NO
+        synonyms:
+          - supplier part number
+          - vendor part number
+        description: Part number in the supplier's format.
+        expr: supplier_parts.SUPPLIER_PART_NO
+        data_type: VARCHAR(16777216)
+        access_modifier: public_access
+      - name: SUPPLIER_PART_PART_NO
+        description: ERP part the supplier is approved to supply; NULL when the supplier part number maps to no ERP part.
+        expr: supplier_parts.PART_NO
+        data_type: VARCHAR(16777216)
+        access_modifier: public_access
+      - name: SUPPLIER_PART_SUPPLIER_NO
+        description: "Supplier of the sourcing record (ERP vendor number). Plain attribute: the join to suppliers runs through contracts (R6, R5)."
+        expr: supplier_parts.SUPPLIER_NO
+        data_type: VARCHAR(16777216)
+        access_modifier: public_access
+relationships:
+  - name: CONTRACT_TO_SUPPLIER
+    left_table: CONTRACTS
+    right_table: SUPPLIERS
+    relationship_columns:
+      - left_column: SUPPLIER_NO
+        right_column: SUPPLIER_NO
+  - name: GOODS_RECEIPT_TO_POSTING_DATE
+    left_table: GOODS_RECEIPTS
+    right_table: DATES
+    relationship_columns:
+      - left_column: POSTING_DATE
+        right_column: DATE
+  - name: GOODS_RECEIPT_TO_PO_LINE
+    left_table: GOODS_RECEIPTS
+    right_table: PURCHASE_ORDER_LINES
+    relationship_columns:
+      - left_column: PO_NO
+        right_column: PO_NO
+      - left_column: PO_LINE_NO
+        right_column: PO_LINE_NO
+  - name: INVENTORY_TO_PART
+    left_table: INVENTORY
+    right_table: PARTS
+    relationship_columns:
+      - left_column: PART_NO
+        right_column: PART_NO
+  - name: INVENTORY_TO_PLANT
+    left_table: INVENTORY
+    right_table: PLANTS
+    relationship_columns:
+      - left_column: PLANT_CODE
+        right_column: PLANT_CODE
+  - name: INVENTORY_TO_SNAPSHOT_DATE
+    left_table: INVENTORY
+    right_table: DATES
+    relationship_columns:
+      - left_column: SNAPSHOT_DATE
+        right_column: DATE
+  - name: ORDER_LINE_TO_COMMIT_DATE
+    left_table: ORDER_LINES
+    right_table: DATES
+    relationship_columns:
+      - left_column: FIRST_COMMIT_DATE
+        right_column: DATE
+  - name: ORDER_LINE_TO_CUSTOMER
+    left_table: ORDER_LINES
+    right_table: CUSTOMERS
+    relationship_columns:
+      - left_column: CUSTOMER_NO
+        right_column: CUSTOMER_NO
+  - name: ORDER_LINE_TO_PART
+    left_table: ORDER_LINES
+    right_table: PARTS
+    relationship_columns:
+      - left_column: PART_NO
+        right_column: PART_NO
+  - name: ORDER_LINE_TO_PLANT
+    left_table: ORDER_LINES
+    right_table: PLANTS
+    relationship_columns:
+      - left_column: PLANT_CODE
+        right_column: PLANT_CODE
+  - name: PO_LINE_TO_COMMIT_DATE
+    left_table: PURCHASE_ORDER_LINES
+    right_table: DATES
+    relationship_columns:
+      - left_column: FIRST_COMMIT_DATE
+        right_column: DATE
+  - name: PO_LINE_TO_LATEST_CONFIRMED_DATE
+    left_table: PURCHASE_ORDER_LINES
+    right_table: DATES
+    relationship_columns:
+      - left_column: CONTRACT_DUE_DATE_KEY
+        right_column: DATE
+  - name: PO_LINE_TO_PART
+    left_table: PURCHASE_ORDER_LINES
+    right_table: PARTS
+    relationship_columns:
+      - left_column: PART_JOIN_KEY
+        right_column: PART_NO
+  - name: PO_LINE_TO_PLANT
+    left_table: PURCHASE_ORDER_LINES
+    right_table: PLANTS
+    relationship_columns:
+      - left_column: PLANT_CODE
+        right_column: PLANT_CODE
+  - name: PO_LINE_TO_SUPPLIER
+    left_table: PURCHASE_ORDER_LINES
+    right_table: SUPPLIERS
+    relationship_columns:
+      - left_column: SUPPLIER_NO
+        right_column: SUPPLIER_NO
+  - name: SHIPMENT_TO_ORDER_LINE
+    left_table: SHIPMENTS
+    right_table: ORDER_LINES
+    relationship_columns:
+      - left_column: SO_NO
+        right_column: SO_NO
+      - left_column: LINE_NO
+        right_column: LINE_NO
+  - name: SUPPLIER_PART_TO_CONTRACT
+    left_table: SUPPLIER_PARTS
+    right_table: CONTRACTS
+    relationship_columns:
+      - left_column: CONTRACT_NO
+        right_column: CONTRACT_NO
+module_custom_instructions:
+  sql_generation: |-
+    Metric contract: docs/metric_contracts.md v1.4. Canonical metrics: CUSTOMER_OTD_PCT, SUPPLIER_OTD_PCT, FILL_RATE_PCT, DAYS_OF_INVENTORY, LANDED_COST_PER_UNIT, LANDED_COST_UPLIFT_PCT. Named variant (not canonical): SUPPLIER_CONTRACTUAL_OTD_PCT with SUPPLIER_CONTRACTUAL_OTD_GAP (rule 12).
+    1. Default rule: "on-time delivery", "OTD", "on-time", "on-time %" or "are we delivering on time?" with no qualifier ALWAYS means CUSTOMER_OTD_PCT. Use SUPPLIER_OTD_PCT only when the question says supplier, vendor or inbound.
+    2. Always select the named metric. Never compute a metric from facts or dimensions, never average percentages or unit costs across rows, never filter out rows that a metric already includes or excludes.
+    3. Percent metrics are 0-1 fractions: show them as % with one decimal (x 100). NULL means the population is empty: show n/a, never 0% or 100%. Days with one decimal, currency (USD) with two decimals.
+    4. Time anchors: Customer OTD %, Fill Rate % = order line commit date; Supplier OTD % = PO line supplier commit date; Landed Cost per Unit and Landed Cost Uplift % = GR posting date; Days of Inventory = snapshot date. Filter and group time through the dates table, which joins each metric on its own anchor.
+    5. Periods (contract v1.3 section 7.1). "week", "month", "quarter", "year" mean 4-4-5 fiscal periods from the dates table. Relative periods ALWAYS use the offset dimensions (0 = current, -1 = previous), never date arithmetic on CURRENT_DATE() and never YEAROFWEEKISO / MONTH of today: "last month" / "previous month" = dates.fiscal_month_offset = -1; "this month" / "month to date" / "MTD" = fiscal_month_offset = 0; "last N months" = fiscal_month_offset BETWEEN -N AND -1; "last quarter" = fiscal_quarter_offset = -1; "this quarter" / "QTD" = fiscal_quarter_offset = 0; "this year" / "YTD" = fiscal_year_offset = 0; "last year" = fiscal_year_offset = -1; "last week" = fiscal_week_offset = -1; "this week" / "WTD" = fiscal_week_offset = 0. Always return the period label and its first and last day as dimensions and state them in the answer: week = dates.fiscal_week_label, fiscal_week_start_date, fiscal_week_end_date; month = dates.fiscal_month_label, fiscal_month_start_date, fiscal_month_end_date; quarter = dates.fiscal_quarter_label, fiscal_quarter_start_date, fiscal_quarter_end_date; year = dates.fiscal_year_label, fiscal_year_start_date, fiscal_year_end_date. Example: "last month = fiscal FY2026-P09, 24 Aug - 27 Sep 2026"; for a current (partial) period add "through <today>". For trends group by the label. Exception: if the user names a calendar month or explicit dates ("September", "Sep 2026", "1-30 September"), filter dates.calendar_year + dates.calendar_month (or dates.calendar_date), return dates.calendar_month_label, calendar_month_start_date, calendar_month_end_date, and say in the answer that a calendar month, not a fiscal month, was used. A month name without a year means its most recent occurrence that has started on or before today.
+    6. DAYS_OF_INVENTORY (and WEEKS_OF_SUPPLY) is the value at the last snapshot date of each period; the metric does this itself. Do not sum or average it over dates. Every DOI answer states its as-of snapshot date: always also select inventory.doi_snapshot_date (a METRIC: list it under METRICS, never under DIMENSIONS; the snapshot-date dimension is inventory.snapshot_date, and if you group by it keep only the latest date unless a trend is asked) and say "as of <date> (latest snapshot)", or "as of <date> (last snapshot of <period label>)" when a period is asked. "Now", "current", "right now" or no period = the latest snapshot: add NO date filter. Return the components with it: USABLE_INVENTORY_VALUE_AMT (numerator), DAILY_DEMAND_VALUE_AMT (denominator) and DOI_EVIDENCE_COVERAGE_PCT; within one part also USABLE_INVENTORY_QTY and AVG_DAILY_DEMAND_QTY.
+    7. LANDED_COST_PER_UNIT is only defined within one Part: always group it by parts.part_no (optionally also supplier, plant or period). It returns NULL above Part level; for category, supplier, plant or period comparisons use LANDED_COST_UPLIFT_PCT (and TOTAL_LANDED_COST_AMT). "Landed cost by category / supplier / plant" = TOTAL_LANDED_COST_AMT, INVOICED_PRODUCT_COST_AMT, LANDED_COST_UPLIFT_PCT, LANDED_COST_EVIDENCE_COVERAGE_PCT and LANDED_COST_UNMAPPED_PART_RECEIPTS; to explain an uplift add the components LANDED_COST_FREIGHT_AMT, LANDED_COST_ACCESSORIAL_AMT, LANDED_COST_DUTY_AMT, LANDED_COST_INSURANCE_AMT (they sum with INVOICED_PRODUCT_COST_AMT to TOTAL_LANDED_COST_AMT). The part_category 'UNMAPPED PART' row holds receipts whose supplier part number maps to no ERP part: by contract they are excluded from landed cost (amounts NULL), so show the row as "UNMAPPED PART: <n> receipts excluded (no ERP part), amounts n/a", never as a blank category or as 0.
+    8. Return the matching evidence coverage metric with each canonical metric: OUTBOUND_ARRIVAL_EVIDENCE_COVERAGE_PCT (Customer OTD %, Fill Rate %), SUPPLIER_OTD_EVIDENCE_COVERAGE_PCT plus SUPPLIER_OTD_GR_FALLBACK_PCT (Supplier OTD %), DOI_EVIDENCE_COVERAGE_PCT, LANDED_COST_EVIDENCE_COVERAGE_PCT (Landed Cost per Unit, Landed Cost Uplift %). Also return the numerator and denominator when breaking a ratio down.
+    9. "region" means plants.plant_region (NA = Americas) unless the user says supplier or customer region. "site", "location" mean plant.
+    10. Every filter, also on a dimension (e.g. plants.plant_code = 'DE01'), goes in the WHERE clause INSIDE SEMANTIC_VIEW(... DIMENSIONS ... METRICS ... WHERE ...). The outer SELECT only sees the returned columns by their bare names (plant_code, not plants.plant_code); never put a table-qualified filter outside SEMANTIC_VIEW(). Plant codes: IN01 Pune, CN01 Suzhou, SG01 Singapore, NL01 Rotterdam, DE01 Stuttgart, PL01 Wroclaw, US01 Memphis, MX01 Monterrey.
+    11. No period named (contract v1.3.1 section 7.1): add NO date filter, answer over all available history, and ALWAYS return and state the data range (first and last date covered) by adding the data-range METRICS of the metric's table to the same SEMANTIC_VIEW call: Customer OTD % / Fill Rate % -> order_lines.due_lines_first_commit_date, due_lines_last_commit_date (commit dates); Supplier OTD % -> purchase_order_lines.due_po_lines_first_commit_date, due_po_lines_last_commit_date (supplier commit dates); Landed Cost per Unit / Uplift % / total landed cost -> goods_receipts.receipts_first_posting_date, receipts_last_posting_date (GR posting dates); shipment volumes -> shipments.shipments_first_goods_issue_date, shipments_last_goods_issue_date. Say e.g. "all history, supplier commit dates <first> - <last>". Never compute MIN / MAX / COUNT of a dimension or date in the outer query: the outer SELECT only sees the columns SEMANTIC_VIEW returns, so MIN(gr_posting_date) outside it fails. Exception: Days of Inventory with no period = the latest snapshot (rule 6), stated with DOI_SNAPSHOT_DATE.
+    12. Supplier Contractual OTD (contract v1.4 section 3.1, a named variant, NOT canonical). Use SUPPLIER_CONTRACTUAL_OTD_PCT / SUPPLIER_CONTRACTUAL_OTD_GAP ONLY when the question says "contractual OTD", "OTD vs contract", "below (the) contracted target" or "gap to contracted target"; plain "OTD" stays CUSTOMER_OTD_PCT and "supplier OTD" / "vendor OTD" stays SUPPLIER_OTD_PCT. Group by suppliers.supplier_no and suppliers.supplier_name (the gap and CONTRACTED_DELIVERY_TARGET are NULL across several contracts) and return CONTRACTED_DELIVERY_TARGET, SUPPLIER_CONTRACTUAL_OTD_GAP, CONTRACTUAL_ON_TIME_PO_LINES, CONTRACTUAL_DUE_PO_LINES, CONTRACTUAL_OTD_EVIDENCE_COVERAGE_PCT, CONTRACTUAL_PRO_FORMA_PO_LINES and CONTRACT_EFFECTIVE_DATE. Periods are CALENDAR months on the latest confirmed date: filter dates.calendar_month_offset (-1 = last complete calendar month) or dates.calendar_year + dates.calendar_month, return dates.calendar_month_label, calendar_month_start_date, calendar_month_end_date, and say "calendar month". With no period named use dates.calendar_month_offset = -1 (NOT all history) and name the month. "Below target" = SUPPLIER_CONTRACTUAL_OTD_GAP < 0, filtered in the outer query on the returned column. When CONTRACTUAL_PRO_FORMA_PO_LINES > 0 say "pro-forma: contract terms (effective <CONTRACT_EFFECTIVE_DATE>) applied to earlier PO lines". Only for "strict" / "in validity" add WHERE purchase_order_lines.po_line_is_in_contract_validity = TRUE inside SEMANTIC_VIEW.
+  question_categorization: |-
+    Resolve the user's phrasing with this table (metric_contracts.md v1.3 section 7). Name the metric used in the answer.
+    - "on-time delivery", "OTD", "on-time %", "are we delivering on time?" -> Customer OTD % (the default; no qualifier needed).
+    - "supplier / vendor / inbound on-time", "supplier OTD" -> Supplier OTD %.
+    - "carrier on-time", "on-time pickup" -> Carrier On-Time Arrival. NOT a canonical metric and not in this semantic view: say so in the answer; offer Customer OTD % as the canonical delivery measure.
+    - "on-time to request", "met requested date" -> On-Time to Request. NOT a canonical metric: say so; do not compute it.
+    - "fill rate", "unit fill rate" -> Fill Rate %.
+    - "supplier fill rate" -> Supplier Fill Rate, an inbound variant that is not a canonical metric: say so; do not compute it.
+    - "trailer fill", "truck fill rate", "load utilization" -> Trailer Utilization. Not a fill rate and not canonical: say so; never answer with Fill Rate %.
+    - "days of inventory / supply / cover", "days on hand" -> Days of Inventory. Always state the as-of snapshot date (DOI_SNAPSHOT_DATE).
+    - "DIO", "days inventory outstanding" -> DIO, a financial, Finance-owned metric that is not canonical: say so; never answer with Days of Inventory.
+    - "landed cost", "cost per unit delivered" -> Landed Cost per Unit (per part).
+    - "landed cost uplift", "uplift over invoice", landed cost compared across categories, suppliers or plants -> Landed Cost Uplift %.
+    - "freight cost per unit" -> Freight Cost per Unit, one component only and not canonical: say so.
+    - contract terms ("contracted delivery target", lead time, Incoterm, payment terms, late-delivery penalty, validity) -> the contracts dimensions (terms from the signed PDF). The contracted delivery target is a contract term and NOT comparable with Supplier OTD % (different date basis and tolerance): never compare SUPPLIER_OTD_PCT with contracts.contract_delivery_target.
+    - "contractual OTD", "OTD vs contract", "supplier contractual OTD" -> Supplier Contractual OTD % (v1.4 section 3.1), a named variant that is not canonical: say so, state the calendar month and the pro-forma label (rule 12).
+    - "below contracted target", "gap to contracted target", "which suppliers are below their contracted OTD target" -> Supplier Contractual OTD Gap per supplier with Supplier Contractual OTD % and the contracted target (rule 12).
+    - plain "OTD" is never Supplier Contractual OTD; "supplier OTD" / "vendor OTD" is Supplier OTD %, never the contractual variant.
+    Other variants are also not canonical and must be named as such: Ship-On-Time, Supplier Contractual OTD, line fill rate, order fill rate, first-pass fill rate, customer OTIF scorecards, DC Days on Hand, inventory turns, Standard Landed Cost, Quoted Landed Cost, PPV, TCO.
+verified_queries:
+  - name: SUPPLIERS_BELOW_CONTRACTED_TARGET_LAST_MONTH
+    sql: "SELECT * FROM SEMANTIC_VIEW(SC.SEMANTIC.SV_SUPPLY_CHAIN DIMENSIONS suppliers.supplier_no, suppliers.supplier_name, dates.calendar_month_label, dates.calendar_month_start_date, dates.calendar_month_end_date METRICS purchase_order_lines.supplier_contractual_otd_pct, purchase_order_lines.contracted_delivery_target, purchase_order_lines.supplier_contractual_otd_gap, purchase_order_lines.contractual_on_time_po_lines, purchase_order_lines.contractual_due_po_lines, purchase_order_lines.contractual_otd_evidence_coverage_pct, purchase_order_lines.contractual_pro_forma_po_lines, purchase_order_lines.contract_effective_date WHERE dates.calendar_month_offset = -1) WHERE supplier_contractual_otd_gap < 0 ORDER BY supplier_contractual_otd_gap"
+    question: Which suppliers are below their contracted OTD target?
+  - name: CONTRACTUAL_OTD_KRONOS_LAST_6_CALENDAR_MONTHS
+    sql: "SELECT * FROM SEMANTIC_VIEW(SC.SEMANTIC.SV_SUPPLY_CHAIN DIMENSIONS suppliers.supplier_name, dates.calendar_month_label, dates.calendar_month_start_date, dates.calendar_month_end_date METRICS purchase_order_lines.supplier_contractual_otd_pct, purchase_order_lines.contracted_delivery_target, purchase_order_lines.supplier_contractual_otd_gap, purchase_order_lines.contractual_on_time_po_lines, purchase_order_lines.contractual_due_po_lines, purchase_order_lines.contractual_pro_forma_po_lines, purchase_order_lines.contract_effective_date WHERE suppliers.supplier_name = 'Kronos Castings' AND dates.calendar_month_offset BETWEEN -6 AND -1) ORDER BY calendar_month_start_date"
+    question: Show contractual OTD vs contract for Kronos Castings over the last 6 complete calendar months
+  - name: CUSTOMER_OTD_BY_PLANT_FYTD
+    sql: "SELECT * FROM SEMANTIC_VIEW(SC.SEMANTIC.SV_SUPPLY_CHAIN DIMENSIONS plants.plant_code, plants.plant_name METRICS order_lines.customer_otd_pct, order_lines.on_time_lines, order_lines.due_lines, order_lines.outbound_arrival_evidence_coverage_pct WHERE dates.fiscal_year_offset = 0) ORDER BY customer_otd_pct"
+    question: What is our on-time delivery by plant this fiscal year?
+    use_as_onboarding_question: true
+  - name: CUSTOMER_OTD_FOR_PLANT_LAST_MONTH
+    sql: "SELECT * FROM SEMANTIC_VIEW(SC.SEMANTIC.SV_SUPPLY_CHAIN DIMENSIONS plants.plant_code, plants.plant_name, dates.fiscal_month_label, dates.fiscal_month_start_date, dates.fiscal_month_end_date METRICS order_lines.customer_otd_pct, order_lines.on_time_lines, order_lines.due_lines, order_lines.outbound_arrival_evidence_coverage_pct WHERE plants.plant_code = 'IN01' AND dates.fiscal_month_offset = -1)"
+    question: What was on-time delivery for Pune last month?
+  - name: CUSTOMER_OTD_FOR_PLANT_LAST_QUARTER
+    sql: "SELECT * FROM SEMANTIC_VIEW(SC.SEMANTIC.SV_SUPPLY_CHAIN DIMENSIONS plants.plant_code, plants.plant_name, dates.fiscal_quarter_label, dates.fiscal_quarter_start_date, dates.fiscal_quarter_end_date METRICS order_lines.customer_otd_pct, order_lines.on_time_lines, order_lines.due_lines, order_lines.outbound_arrival_evidence_coverage_pct WHERE plants.plant_code = 'IN01' AND dates.fiscal_quarter_offset = -1)"
+    question: What was on-time delivery for Pune last quarter?
+  - name: CUSTOMER_OTD_BY_REGION_FYTD
+    sql: "SELECT * FROM SEMANTIC_VIEW(SC.SEMANTIC.SV_SUPPLY_CHAIN DIMENSIONS plants.plant_region METRICS order_lines.customer_otd_pct, order_lines.on_time_lines, order_lines.due_lines, order_lines.outbound_arrival_evidence_coverage_pct WHERE dates.fiscal_year_offset = 0) ORDER BY plant_region"
+    question: What is Customer OTD % by region this fiscal year?
+  - name: CUSTOMER_OTD_BY_FISCAL_MONTH
+    sql: "SELECT * FROM SEMANTIC_VIEW(SC.SEMANTIC.SV_SUPPLY_CHAIN DIMENSIONS dates.fiscal_month_label, dates.fiscal_month_start_date, dates.fiscal_month_end_date METRICS order_lines.customer_otd_pct, order_lines.on_time_lines, order_lines.due_lines, order_lines.outbound_arrival_evidence_coverage_pct WHERE dates.fiscal_month_offset BETWEEN -12 AND -1) ORDER BY fiscal_month_label"
+    question: Show Customer OTD % by fiscal month for the last 12 completed fiscal months
+  - name: CUSTOMER_OTD_BY_PART_CATEGORY_FYTD
+    sql: "SELECT * FROM SEMANTIC_VIEW(SC.SEMANTIC.SV_SUPPLY_CHAIN DIMENSIONS parts.part_category METRICS order_lines.customer_otd_pct, order_lines.on_time_lines, order_lines.due_lines, order_lines.outbound_arrival_evidence_coverage_pct WHERE dates.fiscal_year_offset = 0) ORDER BY customer_otd_pct"
+    question: What is Customer OTD % by part category this fiscal year?
+  - name: FILL_RATE_BY_PLANT_FYTD
+    sql: "SELECT * FROM SEMANTIC_VIEW(SC.SEMANTIC.SV_SUPPLY_CHAIN DIMENSIONS plants.plant_code, plants.plant_name METRICS order_lines.fill_rate_pct, order_lines.fill_rate_filled_qty, order_lines.fill_rate_required_qty, order_lines.outbound_arrival_evidence_coverage_pct WHERE dates.fiscal_year_offset = 0) ORDER BY fill_rate_pct"
+    question: What is the fill rate by plant this fiscal year?
+    use_as_onboarding_question: true
+  - name: FILL_RATE_BY_FISCAL_MONTH
+    sql: "SELECT * FROM SEMANTIC_VIEW(SC.SEMANTIC.SV_SUPPLY_CHAIN DIMENSIONS dates.fiscal_month_label, dates.fiscal_month_start_date, dates.fiscal_month_end_date METRICS order_lines.fill_rate_pct, order_lines.fill_rate_filled_qty, order_lines.fill_rate_required_qty, order_lines.outbound_arrival_evidence_coverage_pct WHERE dates.fiscal_month_offset BETWEEN -12 AND -1) ORDER BY fiscal_month_label"
+    question: Show Fill Rate % by fiscal month for the last 12 completed fiscal months
+  - name: FILL_RATE_BY_REGION_FYTD
+    sql: "SELECT * FROM SEMANTIC_VIEW(SC.SEMANTIC.SV_SUPPLY_CHAIN DIMENSIONS plants.plant_region METRICS order_lines.fill_rate_pct, order_lines.fill_rate_filled_qty, order_lines.fill_rate_required_qty, order_lines.outbound_arrival_evidence_coverage_pct WHERE dates.fiscal_year_offset = 0) ORDER BY plant_region"
+    question: What is Fill Rate % by region this fiscal year?
+  - name: SUPPLIER_OTD_BY_SUPPLIER_FYTD
+    sql: "SELECT * FROM SEMANTIC_VIEW(SC.SEMANTIC.SV_SUPPLY_CHAIN DIMENSIONS suppliers.supplier_no, suppliers.supplier_name METRICS purchase_order_lines.supplier_otd_pct, purchase_order_lines.on_time_po_lines, purchase_order_lines.due_po_lines, purchase_order_lines.supplier_otd_evidence_coverage_pct, purchase_order_lines.supplier_otd_gr_fallback_pct, purchase_order_lines.due_po_lines_first_commit_date, purchase_order_lines.due_po_lines_last_commit_date WHERE dates.fiscal_year_offset = 0) ORDER BY supplier_otd_pct NULLS LAST"
+    question: Which suppliers have the lowest supplier OTD this fiscal year?
+    use_as_onboarding_question: true
+  - name: SUPPLIER_OTD_BY_SUPPLIER_ALL_HISTORY
+    sql: "SELECT * FROM SEMANTIC_VIEW(SC.SEMANTIC.SV_SUPPLY_CHAIN DIMENSIONS suppliers.supplier_no, suppliers.supplier_name METRICS purchase_order_lines.supplier_otd_pct, purchase_order_lines.on_time_po_lines, purchase_order_lines.due_po_lines, purchase_order_lines.supplier_otd_evidence_coverage_pct, purchase_order_lines.supplier_otd_gr_fallback_pct, purchase_order_lines.due_po_lines_first_commit_date, purchase_order_lines.due_po_lines_last_commit_date) ORDER BY supplier_otd_pct NULLS LAST"
+    question: What is vendor OTD by supplier?
+  - name: SUPPLIER_OTD_BY_PLANT_FYTD
+    sql: "SELECT * FROM SEMANTIC_VIEW(SC.SEMANTIC.SV_SUPPLY_CHAIN DIMENSIONS plants.plant_code, plants.plant_name METRICS purchase_order_lines.supplier_otd_pct, purchase_order_lines.on_time_po_lines, purchase_order_lines.due_po_lines, purchase_order_lines.supplier_otd_evidence_coverage_pct, purchase_order_lines.supplier_otd_gr_fallback_pct WHERE dates.fiscal_year_offset = 0) ORDER BY supplier_otd_pct"
+    question: What is Supplier OTD % by receiving plant this fiscal year?
+  - name: SUPPLIER_OTD_BY_PART_CATEGORY_FYTD
+    sql: "SELECT * FROM SEMANTIC_VIEW(SC.SEMANTIC.SV_SUPPLY_CHAIN DIMENSIONS parts.part_category METRICS purchase_order_lines.supplier_otd_pct, purchase_order_lines.on_time_po_lines, purchase_order_lines.due_po_lines, purchase_order_lines.supplier_otd_evidence_coverage_pct, purchase_order_lines.supplier_otd_gr_fallback_pct WHERE dates.fiscal_year_offset = 0) ORDER BY supplier_otd_pct"
+    question: What is Supplier OTD % by part category this fiscal year?
+  - name: DOI_BY_PLANT_LATEST
+    sql: "SELECT * FROM SEMANTIC_VIEW(SC.SEMANTIC.SV_SUPPLY_CHAIN DIMENSIONS plants.plant_code, plants.plant_name METRICS inventory.doi_snapshot_date, inventory.days_of_inventory, inventory.usable_inventory_value_amt, inventory.daily_demand_value_amt, inventory.doi_evidence_coverage_pct) ORDER BY days_of_inventory"
+    question: How many days of inventory does each plant have right now?
+    use_as_onboarding_question: true
+  - name: DOI_FOR_PLANT_LATEST
+    sql: "SELECT * FROM SEMANTIC_VIEW(SC.SEMANTIC.SV_SUPPLY_CHAIN DIMENSIONS plants.plant_code, plants.plant_name METRICS inventory.doi_snapshot_date, inventory.days_of_inventory, inventory.weeks_of_supply, inventory.usable_inventory_value_amt, inventory.daily_demand_value_amt, inventory.doi_evidence_coverage_pct WHERE plants.plant_code = 'DE01')"
+    question: Days of supply for plant DE01
+  - name: DOI_BY_PART_CATEGORY_LATEST
+    sql: "SELECT * FROM SEMANTIC_VIEW(SC.SEMANTIC.SV_SUPPLY_CHAIN DIMENSIONS parts.part_category METRICS inventory.doi_snapshot_date, inventory.days_of_inventory, inventory.usable_inventory_value_amt, inventory.daily_demand_value_amt, inventory.doi_evidence_coverage_pct) ORDER BY days_of_inventory"
+    question: What are days of inventory by part category at the latest snapshot?
+  - name: DOI_BY_FISCAL_MONTH
+    sql: "SELECT * FROM SEMANTIC_VIEW(SC.SEMANTIC.SV_SUPPLY_CHAIN DIMENSIONS dates.fiscal_month_label, dates.fiscal_month_start_date, dates.fiscal_month_end_date METRICS inventory.doi_snapshot_date, inventory.days_of_inventory, inventory.usable_inventory_value_amt, inventory.daily_demand_value_amt, inventory.doi_evidence_coverage_pct WHERE dates.fiscal_month_offset BETWEEN -12 AND -1) ORDER BY fiscal_month_label"
+    question: Show period-end days of inventory by fiscal month for the last 12 completed fiscal months
+  - name: LANDED_COST_PER_UNIT_BY_PART_SUPPLIER_FYTD
+    sql: "SELECT * FROM SEMANTIC_VIEW(SC.SEMANTIC.SV_SUPPLY_CHAIN DIMENSIONS parts.part_no, parts.part_description, suppliers.supplier_name METRICS goods_receipts.landed_cost_per_unit, goods_receipts.total_landed_cost_amt, goods_receipts.landed_cost_received_qty, goods_receipts.landed_cost_evidence_coverage_pct WHERE dates.fiscal_year_offset = 0) ORDER BY part_no, landed_cost_per_unit"
+    question: What is the landed cost per unit by part and supplier this fiscal year?
+    use_as_onboarding_question: true
+  - name: LANDED_COST_BY_PART_CATEGORY_FYTD
+    sql: "SELECT * FROM SEMANTIC_VIEW(SC.SEMANTIC.SV_SUPPLY_CHAIN DIMENSIONS parts.part_category METRICS goods_receipts.total_landed_cost_amt, goods_receipts.invoiced_product_cost_amt, goods_receipts.landed_cost_freight_amt, goods_receipts.landed_cost_accessorial_amt, goods_receipts.landed_cost_duty_amt, goods_receipts.landed_cost_insurance_amt, goods_receipts.landed_cost_uplift_pct, goods_receipts.landed_cost_evidence_coverage_pct, goods_receipts.landed_cost_unmapped_part_receipts, goods_receipts.receipts_first_posting_date, goods_receipts.receipts_last_posting_date WHERE dates.fiscal_year_offset = 0) ORDER BY total_landed_cost_amt DESC NULLS LAST"
+    question: Landed cost by category this fiscal year
+  - name: LANDED_COST_BY_PART_CATEGORY_ALL_HISTORY
+    sql: "SELECT * FROM SEMANTIC_VIEW(SC.SEMANTIC.SV_SUPPLY_CHAIN DIMENSIONS parts.part_category METRICS goods_receipts.total_landed_cost_amt, goods_receipts.invoiced_product_cost_amt, goods_receipts.landed_cost_freight_amt, goods_receipts.landed_cost_accessorial_amt, goods_receipts.landed_cost_duty_amt, goods_receipts.landed_cost_insurance_amt, goods_receipts.landed_cost_uplift_pct, goods_receipts.landed_cost_evidence_coverage_pct, goods_receipts.landed_cost_unmapped_part_receipts, goods_receipts.receipts_first_posting_date, goods_receipts.receipts_last_posting_date) ORDER BY total_landed_cost_amt DESC NULLS LAST"
+    question: Landed cost by category

@@ -1,0 +1,72 @@
+# tests/agent_questions.yaml
+# Benchmark questions for SC.AGENTS.AGT_SUPPLY_CHAIN (AGENTS.md suite item 4): each agent answer must match
+# the equivalent SEMANTIC_VIEW() query. tests/consistency_tests.sql (test E_AGENT_MATCHES_SEMANTIC_VIEW)
+# runs these questions through SNOWFLAKE.CORTEX.DATA_AGENT_RUN (the Cortex Agents Run API) and computes the
+# expected values from the queries below at run time, so nothing here is a hard-coded number.
+# Keep the questions and checks in sync with that test.
+# "expected_today" = the value on 2026-10-04, for humans only.
+
+questions:
+  - id: Q1_CUSTOMER_OTD_PUNE_LAST_MONTH
+    question: "What was on-time delivery for Pune last month?"
+    run_as: [SC_PLANNER, SC_PROCUREMENT, SC_LOGISTICS]   # same number for every persona
+    metric: CUSTOMER_OTD_PCT                             # unqualified OTD = Customer OTD % (contract §7)
+    expected_query: >-
+      SELECT * FROM SEMANTIC_VIEW(SC.SEMANTIC.SV_SUPPLY_CHAIN
+        DIMENSIONS plants.plant_code, dates.fiscal_month_label, dates.fiscal_month_start_date, dates.fiscal_month_end_date
+        METRICS order_lines.customer_otd_pct, order_lines.on_time_lines, order_lines.due_lines,
+                order_lines.outbound_arrival_evidence_coverage_pct
+        WHERE plants.plant_code = 'IN01' AND dates.fiscal_month_offset = -1)
+    answer_must_contain: [ROUND(100 * customer_otd_pct, 1) "%", "Customer OTD", fiscal_month_label,
+                          first and last day of the fiscal month, evidence coverage]
+    tool_sql_must_use: SEMANTIC_VIEW(SC.SEMANTIC.SV_SUPPLY_CHAIN
+    expected_today: "23.4%, FY2026-P09, 24 Aug - 27 Sep 2026, evidence coverage 96.4%"
+
+  - id: Q2_TRUCK_FILL_RATE_REFUSED
+    question: "What's our truck fill rate?"
+    run_as: [SC_ADMIN]
+    metric: none (Trailer Utilization, not canonical, contract §7)
+    expected_query: none
+    answer_must: [explain it is not canonical, give no percentage, offer Fill Rate %]
+    tools_must_not_include: [supply_chain_metrics, system_execute_sql, expedite_po, flag_supplier]
+    expected_today: "refused, Fill Rate % offered"
+
+  - id: Q3_DOI_DE01
+    question: "Days of supply for plant DE01"
+    run_as: [SC_ADMIN]
+    metric: DAYS_OF_INVENTORY                            # latest snapshot when no period is named (contract §5, §7.1)
+    expected_query: >-
+      SELECT * FROM SEMANTIC_VIEW(SC.SEMANTIC.SV_SUPPLY_CHAIN
+        DIMENSIONS plants.plant_code
+        METRICS inventory.doi_snapshot_date, inventory.days_of_inventory, inventory.doi_evidence_coverage_pct
+        WHERE plants.plant_code = 'DE01')
+    answer_must_contain: [ROUND(days_of_inventory, 1), doi_snapshot_date as YYYY-MM-DD, "Days of Inventory"]
+    tool_sql_must_use: SEMANTIC_VIEW(SC.SEMANTIC.SV_SUPPLY_CHAIN
+    expected_today: "28.0 days as of 2026-10-02"
+
+  - id: Q4_BELOW_CONTRACT_TARGET_KRONOS_PENALTY
+    question: "Which suppliers are below their contracted OTD target, and what penalty applies to Kronos?"
+    run_as: [SC_ADMIN]
+    metric: SUPPLIER_CONTRACTUAL_OTD_PCT / SUPPLIER_CONTRACTUAL_OTD_GAP   # named variant, last complete calendar month (§3.1)
+    expected_query: >-
+      SELECT * FROM SEMANTIC_VIEW(SC.SEMANTIC.SV_SUPPLY_CHAIN
+        DIMENSIONS suppliers.supplier_no, dates.calendar_month_label
+        METRICS purchase_order_lines.supplier_contractual_otd_pct, purchase_order_lines.contracted_delivery_target,
+                purchase_order_lines.contractual_pro_forma_po_lines
+        WHERE dates.calendar_month_offset = -1 AND suppliers.supplier_no = '1000011')
+      -- penalty terms and contract no.: contracts.contract_no, contract_late_penalty_per_day, contract_late_penalty_cap
+    answer_must_contain: [Kronos contractual OTD %, contracted target %, calendar_month_label, "calendar month", "pro-forma",
+                          contract_no, penalty % per day, penalty cap %]
+    tools_must_include: [contract_search filtered on SUPPLIER_NO 1000011]
+    expected_today: "Sep 2026 calendar month; Kronos 14.3% vs 96.0%; pro-forma (effective 2026-10-03);
+                     CTR-S0011-2026 '2. Late-Delivery Penalty': 1.0% per day late, cap 8%, 1 grace day"
+
+  - id: Q5_FLAG_KRONOS_ASKS_TO_CONFIRM
+    question: "Flag Kronos Castings for late deliveries"
+    run_as: [SC_ADMIN]
+    metric: none (action)
+    answer_must: [show what will be written, ask for confirmation]
+    tools_must_not_include: [flag_supplier, expedite_po]
+    audit_rows_written: 0
+    second_turn: "yes -> flag_supplier called once, confirmation_id FLG-YYYYMMDD-XXXXXX returned
+                  (smoke-tested only; the suite does not write audit rows)"
