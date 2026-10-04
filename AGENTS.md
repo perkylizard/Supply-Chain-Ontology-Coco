@@ -41,6 +41,7 @@ sql/
   30_semantic_view.sql     SV_SUPPLY_CHAIN (DDL; metrics, synonyms, VQRs)        (exists)
   40_agents_contracts.sql  Cortex Search service CSS_CONTRACTS                   (exists)
   40_agents_supply_chain.sql Cortex Agent AGT_SUPPLY_CHAIN + EXPEDITE_PO / FLAG_SUPPLIER tools (exists)
+  45_app.sql               Streamlit app AGENTS.APP_SUPPLY_CHAIN: stage upload of app/, container runtime, persona USAGE, caller grants (exists)
   50_governance.sql        GOVERNANCE: plant row access, masking, certification tags, grants, persona demo users (exists)
   60_ops_dq_contracts.sql  OPS.DQ_CONTRACT_TERMS_RECON (PDF vs supplier system)  (exists)
   60_ops_*.sql             OPS tables, alerts, tasks                            (planned)
@@ -48,17 +49,20 @@ tests/
   consistency_tests.sql    consistency test suite                               (exists)
   agent_questions.yaml     benchmark questions + expected semantic-view queries (exists)
 app/
-  streamlit_app.py         Streamlit UI                                          (planned)
+  streamlit_app.py         Streamlit UI (5 pages; deployed by sql/45_app.sql)     (exists)
+  pyproject.toml, .streamlit/config.toml, snowflake.yml   app runtime files    (exist)
 ```
 
 SQL files are numbered in run order and must be idempotent (`CREATE ... IF NOT EXISTS` / `CREATE OR REPLACE` / `CREATE OR ALTER`).
 **Re-run `sql/50_governance.sql` after re-running `sql/20_conformed.sql`:** `CREATE OR REPLACE DYNAMIC TABLE` drops the row access and masking policies attached in `sql/50` (tests `H1_*` / `H2_*` FAIL until it is re-run). Certification tags live in the `sql/30` DDL and survive its re-runs.
+**Re-run `sql/45_app.sql` after every change under `app/`** (it re-uploads `app/` to `@SC.AGENTS.APP_STAGE/app/` and recreates the app; tests `E_NO_FACT_DIM_REFS_IN_APP` / `I_APP_*` scan that stage).
 
 ## Snowflake environment
 
 - Database `SC`, warehouse `SC_WH` (XSMALL, auto-suspend 60s). Build as role **`SC_ADMIN`**, the owner of everything in `SC`. Use `ACCOUNTADMIN` only for account-level grants.
 - Persona roles `SC_PLANNER`, `SC_PROCUREMENT`, `SC_LOGISTICS` get SELECT on `SEMANTIC` and `AGENTS` only. Never grant them anything on `RAW_*`, `CONFORMED`, `LEGACY`, `OPS` or `GOVERNANCE`.
 - Schemas: `RAW_ERP`, `RAW_LOGISTICS`, `RAW_SUPPLIER`, `RAW_IOT`, `RAW_DOCS`, `CONFORMED`, `LEGACY`, `SEMANTIC`, `AGENTS`, `OPS`, `GOVERNANCE` (added 2026-10-04: tags, policies, their mapping tables; SC_ADMIN only).
+- Streamlit app (`sql/45_app.sql`): `SC.AGENTS.APP_SUPPLY_CHAIN`, owned by SC_ADMIN, **container runtime** (`SYSTEM$ST_CONTAINER_RUNTIME_PY3_11`, pool `SYSTEM_COMPUTE_POOL_CPU`, queries on `SC_WH`), USAGE for the three persona roles. Every metric number and every agent run goes through the **restricted caller's rights** connection, i.e. as the viewer's *default* role, so plant row access and masking apply exactly as in Snowflake Intelligence. The caller grants to SC_ADMIN are an allow-list (SC_WH, SC, SEMANTIC + SV_SUPPLY_CHAIN, AGENTS + agent / search service / the two action procedures, and USAGE + PROGRAM USAGE on the shared `SNOWFLAKE` database for `DATA_AGENT_RUN`); never on `RAW_*`, `CONFORMED`, `LEGACY`, `OPS` or `GOVERNANCE` (test `I_APP_CALLER_GRANTS_ALLOW_LIST`).
 - Governance (`sql/50_governance.sql`): `RAP_PLANT_ACCESS` on `DIM_PLANT` and the five plant-level facts. SC_ADMIN, SC_PLANNER and SC_PROCUREMENT see all plants; SC_LOGISTICS sees APAC + EMEA (hidden: US01, MX01). SC_LOGISTICS gets supplier / PO unit price as NULL and the contract penalty clause as `***MASKED***`. Penalty sections are not indexed in `CSS_CONTRACTS`, because Cortex Search can't mask per caller. Persona demo users `SC_DEMO_<PERSONA>` (TYPE PERSON, default role = persona) are created without passwords; never write passwords into a file.
 
 ## Naming conventions
@@ -72,6 +76,7 @@ SQL files are numbered in run order and must be idempotent (`CREATE ... IF NOT E
 | Semantic view | `SEMANTIC` | `SV_<DOMAIN>` | `SV_SUPPLY_CHAIN` |
 | Cortex Agent | `AGENTS` | `AGT_<NAME>` | `AGT_SUPPLY_CHAIN` |
 | Cortex Search service | `AGENTS` | `CSS_<CORPUS>` | `CSS_CONTRACTS` |
+| Streamlit app (+ its source stage) | `AGENTS` | `APP_<NAME>` (stage `APP_STAGE`) | `APP_SUPPLY_CHAIN` |
 | Legacy persona view | `LEGACY` | `V_<PERSONA>_<METRIC>` | `V_PLANNING_OTD` |
 | Governance objects | `GOVERNANCE` | tags by attribute name (`METRIC_OWNER`, `CERTIFIED`); `RAP_*` row access policies, `MASK_*` masking policies, `GOV_*` mapping tables | `GOVERNANCE.RAP_PLANT_ACCESS`, `GOVERNANCE.MASK_PENALTY_CLAUSE`, `GOVERNANCE.GOV_ROLE_PLANT_ACCESS` |
 | Ops objects | `OPS` | `TEST_*`, `DQ_*`, `ALERT_*`, `TASK_*`, `GEN_*` (synthetic-data generator state) | `OPS.TEST_RESULTS`, `OPS.GEN_INBOUND_PLAN`, `OPS.ALERT_AGENT_ACTIONS` (audited agent expedite / flag requests) |
@@ -89,8 +94,9 @@ Column conventions:
    - Agents, Streamlit, Slack and notebooks must get numbers from the semantic view (via Cortex Analyst or `SEMANTIC_VIEW()`), never by querying `FACT_*` / `DIM_*` and doing arithmetic themselves.
    - **Approved exception: `SC.LEGACY`** (`sql/25_legacy_views.sql`). Its views deliberately reproduce each team's current, inconsistent OTD and Fill Rate logic from `conflict_matrix.md` §3 as the "before" state of the demo, so metric logic and metric-like columns are allowed there and nowhere else. LEGACY reads `RAW_*` only, its numbers are never canonical, and rule 2 still applies in full.
    - **Approved TEST-ONLY exception (decided 2026-10-03): the golden-record copy in `SC.OPS`.** The golden-record test (`tests/consistency_tests.sql`, section E2) may create the semantic view `SC.OPS.TEST_GOLDEN_SV_SUPPLY_CHAIN` and transient fixtures `SC.OPS.TEST_GOLDEN_*`. The view is cloned at run time from the deployed `SV_SUPPLY_CHAIN` YAML, changing only its base tables (and dropping its verified queries); the fixtures hold the `conflict_matrix.md` §4 RAW rows plus the deployed CONFORMED queries replayed on them. Conditions: created and dropped inside one test run (`E_GOLDEN_FIXTURES_DROPPED` enforces it), never authored or edited by hand, never granted to any role, never used by an agent, app or notebook, and its numbers are never reported. Metric logic still has exactly one source: `sql/30_semantic_view.sql`.
+   - **Approved app exception (decided 2026-10-04, playbook Step 9): owner's-rights reads in `SC.AGENTS.APP_SUPPLY_CHAIN`.** (a) The page "The Problem" displays the three `SC.LEGACY.V_*_OTD_FILL` Pune numbers (last calendar month) next to the canonical Customer OTD %, as the labelled, non-canonical "before" state; this is the only exception to rule 2 and covers display on that page only (never an input to an agent, a metric, an answer or any other page). (b) The pages "Trust" and "One answer, every persona" read `SC.OPS.TEST_RESULTS`, `SC.OPS.TEST_PERSONA_RESULTS`, `SC.OPS.ALERT_AGENT_ACTIONS` and `SC.OPS.DQ_CONTRACT_TERMS_RECON` (summary + PDF-side values only), and "Ontology & contracts" reads the metric certification tags. Conditions: read with the app owner's rights (SC_ADMIN), so personas still get **no** grant on `LEGACY` / `OPS`; read-only; for viewers whose policies hide plants or mask fields, OPS free text (test details, audit reason / evidence) is hidden and audit rows are limited to plants / suppliers they can see through the semantic view; the allowed objects are enforced by `I_APP_SOURCE_REFS_ALLOW_LIST`. All metric numbers on every page still come only from `SV_SUPPLY_CHAIN` or `AGT_SUPPLY_CHAIN` with the viewer's rights.
    - Adding any other exception requires an explicit decision recorded here.
-2. **`SC.LEGACY` is demo-only.** It must never be a tool or data source for an agent, app, or any object in `CONFORMED`, `SEMANTIC` or `AGENTS`.
+2. **`SC.LEGACY` is demo-only.** It must never be a tool or data source for an agent, app, or any object in `CONFORMED`, `SEMANTIC` or `AGENTS`. Sole exception: the labelled "before" display on the app page "The Problem" (rule 1, approved app exception of 2026-10-04).
 3. **Layers flow forward only:** RAW → CONFORMED → SEMANTIC → AGENTS → consumers.
 4. **Synonyms:** "on-time delivery" / "OTD" / "on-time" are synonyms of `CUSTOMER_OTD_PCT` only. Never attach them to another metric.
 5. **Don't invent definitions.** If a request needs a metric or rule not in `metric_contracts.md`, propose a contract change and ask before implementing it.
@@ -119,4 +125,5 @@ The suite must cover (see `docs/architecture.md` §6):
 5. No dynamic table in `FAILED` / `UPSTREAM_FAILED`.
 6. Persona roles cannot read `RAW_*`, `CONFORMED`, `LEGACY`, `OPS` or `GOVERNANCE`.
 7. RAW integrity summary (section F, recurring data-quality check): orphans per foreign key, duplicate keys, date ranges (fresh and plausible), % split shipments, % of PODs that change date in plant-local time. Planted issues must stay inside their planted band. When a RAW table or foreign key is added, add it to section F.
-8. Governance (section H, `sql/50_governance.sql`): row access attached and the role -> plant mapping matches the regions; persona-by-persona values through `SEMANTIC_VIEW()` equal SC_ADMIN's on every visible plant, and a hidden plant gives no rows (not an error), also through the agent; masked fields are masked for SC_LOGISTICS (through the SV, Cortex Search and the agent); certification tags are present; persona grants match the allow-list; the persona demo users are configured.
+8. Governance (section H, `sql/50_governance.sql`): row access attached and the role -> plant mapping matches the regions; persona-by-persona values through `SEMANTIC_VIEW()` equal SC_ADMIN's on every visible plant, and a hidden plant gives no rows (not an error), also through the agent; masked fields are masked for SC_LOGISTICS (through the SV, Cortex Search and the agent); certification tags are present; persona grants match the allow-list; the persona demo users are configured. The per-persona values of each run are stored in `SC.OPS.TEST_PERSONA_RESULTS` (shown by the app).
+9. App (section I, `sql/45_app.sql`): `E_NO_FACT_DIM_REFS_IN_APP` (no `FACT_` / `DIM_` / `CONFORMED` / `RAW_` in the deployed `app/` source), `I_APP_SOURCE_REFS_ALLOW_LIST` (SC objects named by the app are the allowed ones; no DDL / DML / CALL), `I_APP_DEPLOYED` (container runtime, SC_WH, live version from `APP_STAGE`, persona USAGE, caller's-rights connection), `I_APP_CALLER_GRANTS_ALLOW_LIST`, `I_APP_PERSONA_RESULTS_RECORDED`.

@@ -2217,6 +2217,39 @@ SELECT 'H1_GOV_PERSONA_ROWS_THROUGH_SEMANTIC_VIEW',
                || IFF(s.V LIKE 'ERROR|%', ' ' || s.V, ''), '; ') WITHIN GROUP (ORDER BY s.ROLE_NAME)
 FROM s LEFT JOIN e ON e.ROLE_NAME = s.ROLE_NAME CROSS JOIN x;
 
+-- Persona results, structured (read by the app page "One answer, every persona", sql/45_app.sql): what each role
+-- got through SEMANTIC_VIEW() (H1 above) and through the agent (E_AGENT_Q1, $AQ1_*), exactly as recorded in this
+-- run; nothing is recomputed. IS_EQUAL_TO_ADMIN = same displayed value as SC_ADMIN's semantic-view result.
+CREATE TABLE IF NOT EXISTS SC.OPS.TEST_PERSONA_RESULTS (
+  RUN_ID            VARCHAR      COMMENT 'Suite run (SC.OPS.TEST_RESULTS.RUN_ID).',
+  RUN_TS            TIMESTAMP_TZ COMMENT 'When the suite recorded the row (UTC).',
+  ROLE_NAME         VARCHAR      COMMENT 'Role the query ran as (USE ROLE, secondary roles off); SC_ADMIN = reference.',
+  SURFACE           VARCHAR      COMMENT 'SEMANTIC_VIEW (SEMANTIC_VIEW() query) or AGENT (AGT_SUPPLY_CHAIN via DATA_AGENT_RUN).',
+  CHECK_NAME        VARCHAR      COMMENT 'What was asked, e.g. CUSTOMER_OTD_IN01_LAST_FISCAL_MONTH.',
+  DISPLAY_VALUE     VARCHAR      COMMENT 'Value as the role got it, formatted as in the answer (one decimal).',
+  VISIBLE_PLANTS    NUMBER       COMMENT 'Plants the role sees through the semantic view.',
+  IS_EQUAL_TO_ADMIN BOOLEAN      COMMENT 'DISPLAY_VALUE equals SC_ADMIN''s semantic-view value for the same check.',
+  DETAIL            VARCHAR      COMMENT 'Raw recorded string (role|...), for audit.'
+)
+COMMENT = 'Per-persona results of the consistency suite (tests/consistency_tests.sql H1 / E_AGENT_Q1). Written only by the suite; read by SC.AGENTS.APP_SUPPLY_CHAIN with owner''s rights.';
+INSERT INTO SC.OPS.TEST_PERSONA_RESULTS
+WITH x AS (SELECT MAX(IFF(PLANT_CODE = 'IN01', OTD_PCT_1, NULL)) || '%' AS OTD, MAX(IFF(PLANT_CODE = 'DE01', DOI_1, NULL)) || ' days' AS DOI,
+                  COUNT(*) AS N FROM SC.OPS._GOV_ADMIN_PLANT),
+sv AS (SELECT SPLIT_PART(COLUMN1, '|', 1) AS ROLE_NAME, ARRAY_SIZE(SPLIT(SPLIT_PART(COLUMN1, '|', 2), ',')) AS N,
+              SPLIT_PART(COLUMN1, '|', 6) || '%' AS OTD, SPLIT_PART(COLUMN1, '|', 7) || ' days' AS DOI, SPLIT_PART(COLUMN1, '|', 5) AS US01, COLUMN1 AS V
+       FROM VALUES ($GOV_SV_PLANNER), ($GOV_SV_PROCUREMENT), ($GOV_SV_LOGISTICS)
+       UNION ALL SELECT 'SC_ADMIN', x.N, x.OTD, x.DOI, (SELECT COUNT(*) FROM SC.OPS._GOV_ADMIN_PLANT WHERE PLANT_CODE = 'US01')::VARCHAR, 'SC_ADMIN reference' FROM x),
+ag AS (SELECT SPLIT_PART(COLUMN1, '|', 1) AS ROLE_NAME, SPLIT_PART(COLUMN1, '|', 2) AS ANS, COLUMN1 AS V
+       FROM VALUES ($AQ1_PLANNER), ($AQ1_PROCUREMENT), ($AQ1_LOGISTICS))
+SELECT $RUN_ID, CURRENT_TIMESTAMP(), sv.ROLE_NAME, 'SEMANTIC_VIEW', 'CUSTOMER_OTD_IN01_LAST_FISCAL_MONTH', sv.OTD, sv.N, sv.OTD = x.OTD, sv.V FROM sv, x
+UNION ALL
+SELECT $RUN_ID, CURRENT_TIMESTAMP(), sv.ROLE_NAME, 'SEMANTIC_VIEW', 'DOI_DE01_LATEST_SNAPSHOT', sv.DOI, sv.N, sv.DOI = x.DOI, sv.V FROM sv, x
+UNION ALL
+SELECT $RUN_ID, CURRENT_TIMESTAMP(), sv.ROLE_NAME, 'SEMANTIC_VIEW', 'HIDDEN_PLANT_US01_ROWS', sv.US01, sv.N, NULL, sv.V FROM sv
+UNION ALL
+SELECT $RUN_ID, CURRENT_TIMESTAMP(), ag.ROLE_NAME, 'AGENT', 'CUSTOMER_OTD_IN01_LAST_FISCAL_MONTH', ag.ANS, s2.N, ag.ANS = x.OTD, ag.V
+FROM ag CROSS JOIN x LEFT JOIN sv s2 ON s2.ROLE_NAME = ag.ROLE_NAME;
+
 INSERT INTO SC.OPS._RESULTS
 SELECT 'H1_GOV_HIDDEN_PLANT_THROUGH_AGENT',
        IFF(SPLIT_PART($GOV_AGENT_HIDDEN, '|', 1) = 'SC_LOGISTICS' AND SPLIT_PART($GOV_AGENT_HIDDEN, '|', 2) = 'none'
@@ -2467,7 +2500,8 @@ FROM t;
 
 -- H4. Grants (sql/00, sql/40, sql/50): persona roles hold an allow-list only -- USAGE on SC, SC_WH, schemas
 -- SEMANTIC and AGENTS, SELECT on SEMANTIC (and future AGENTS tables / views), USAGE on the agent, search service
--- and action procedures in AGENTS, SNOWFLAKE.CORTEX_USER and the Snowflake Intelligence object; no role grants,
+-- and action procedures in AGENTS, USAGE on the app SC.AGENTS.APP_SUPPLY_CHAIN (sql/45),
+-- SNOWFLAKE.CORTEX_USER and the Snowflake Intelligence object; no role grants,
 -- nothing on RAW_*, CONFORMED, LEGACY, OPS or GOVERNANCE. PUBLIC holds nothing on SC or SC_WH.
 INSERT INTO SC.OPS._RESULTS
 WITH g AS (SELECT ROLE_NAME, PRIVILEGE, GRANTED_ON, REPLACE(NAME, '"', '') AS NAME FROM SC.OPS._PERSONA_GRANTS),
@@ -2478,6 +2512,7 @@ c AS (SELECT g.*, (
      OR (PRIVILEGE = 'SELECT' AND GRANTED_ON IN ('SEMANTIC_VIEW', 'TABLE', 'VIEW') AND STARTSWITH(NAME, 'SC.SEMANTIC.'))
      OR (PRIVILEGE = 'SELECT' AND GRANTED_ON IN ('TABLE', 'VIEW') AND STARTSWITH(NAME, 'SC.AGENTS.'))
      OR (PRIVILEGE = 'USAGE' AND GRANTED_ON IN ('CORTEX_AGENT', 'CORTEX_SEARCH_SERVICE', 'PROCEDURE') AND STARTSWITH(NAME, 'SC.AGENTS.'))
+     OR (PRIVILEGE = 'USAGE' AND GRANTED_ON = 'STREAMLIT' AND NAME = 'SC.AGENTS.APP_SUPPLY_CHAIN')
      OR (PRIVILEGE = 'USAGE' AND GRANTED_ON = 'DATABASE_ROLE' AND NAME = 'SNOWFLAKE.CORTEX_USER')
      OR (PRIVILEGE = 'USAGE' AND GRANTED_ON = 'SNOWFLAKE_INTELLIGENCE' AND NAME = 'SNOWFLAKE_INTELLIGENCE_OBJECT_DEFAULT')) AS ALLOWED
       FROM g),
@@ -2584,10 +2619,123 @@ SELECT 'H5_GOV_PERSONA_DEMO_USERS',
           WITHIN GROUP (ORDER BY NAME)
 FROM t;
 
--- E. Layers not built yet
+-- -----------------------------------------------------------------------------
+-- I. Streamlit app SC.AGENTS.APP_SUPPLY_CHAIN (sql/45_app.sql, app/streamlit_app.py)
+-- The deployed source is read line by line from its source stage @SC.AGENTS.APP_STAGE/app/ (sql/45 uploads
+-- app/ there; the Streamlit live version itself is not readable by SQL, so I_APP_DEPLOYED asserts that the
+-- app's source location IS that stage).
+-- -----------------------------------------------------------------------------
+CREATE FILE FORMAT IF NOT EXISTS SC.OPS.TEST_FF_TEXT_LINES TYPE = CSV FIELD_DELIMITER = NONE RECORD_DELIMITER = '\n'
+  ESCAPE_UNENCLOSED_FIELD = NONE FIELD_OPTIONALLY_ENCLOSED_BY = NONE SKIP_BLANK_LINES = FALSE
+  COMMENT = 'Reads source files line by line (consistency tests: app/ reference scan).';
+CREATE OR REPLACE TEMPORARY TABLE SC.OPS._APP_SRC (F VARCHAR, LINE_NO NUMBER, TXT VARCHAR);
+EXECUTE IMMEDIATE $$
+BEGIN
+  INSERT INTO SC.OPS._APP_SRC
+  SELECT METADATA$FILENAME, METADATA$FILE_ROW_NUMBER, $1
+  FROM @SC.AGENTS.APP_STAGE/app/ (FILE_FORMAT => 'SC.OPS.TEST_FF_TEXT_LINES');
+  RETURN 'read';
+EXCEPTION WHEN OTHER THEN RETURN 'stage not readable: ' || LEFT(SQLERRM, 200);
+END;
+$$;
+
+-- E_NO_FACT_DIM_REFS_IN_APP (AGENTS.md suite item 3): no reference to the layers below SEMANTIC anywhere in app/
 INSERT INTO SC.OPS._RESULTS
-SELECT * FROM VALUES
-  ('E_NO_FACT_DIM_REFS_IN_APP',          'SKIP', 'app/ not built yet');
+SELECT 'E_NO_FACT_DIM_REFS_IN_APP',
+       IFF(COUNT_IF(F ILIKE '%streamlit_app.py') > 0 AND COUNT_IF(REGEXP_LIKE(TXT, '.*((FACT|DIM)_|CONFORMED|RAW_).*', 'i')) = 0, 'PASS', 'FAIL'),
+       COUNT(DISTINCT F) || ' deployed app files, ' || COUNT(*) || ' lines; lines referencing FACT_ / DIM_ / CONFORMED / RAW_: '
+       || COUNT_IF(REGEXP_LIKE(TXT, '.*((FACT|DIM)_|CONFORMED|RAW_).*', 'i'))
+       || COALESCE(' (' || NULLIF(LISTAGG(IFF(REGEXP_LIKE(TXT, '.*((FACT|DIM)_|CONFORMED|RAW_).*', 'i'), F || ':' || LINE_NO, NULL), ', '), '') || ')', '')
+FROM SC.OPS._APP_SRC;
+
+-- I_APP_SOURCE_REFS_ALLOW_LIST: every SC object the app names is on the allow-list (semantic view, agent, the
+-- AGENTS.md 2026-10-04 exceptions: 3 LEGACY views, 4 OPS objects, tag lookup) and the app issues no DDL / DML
+INSERT INTO SC.OPS._RESULTS
+WITH refs AS (SELECT s.F, s.LINE_NO, UPPER(r.VALUE::VARCHAR) AS REF
+              FROM SC.OPS._APP_SRC s, LATERAL FLATTEN(INPUT => REGEXP_SUBSTR_ALL(s.TXT, 'SC\\.[A-Za-z_$]+\\.[A-Za-z0-9_$]+')) r),
+ok AS (SELECT COLUMN1 AS REF FROM VALUES ('SC.SEMANTIC.SV_SUPPLY_CHAIN'), ('SC.AGENTS.AGT_SUPPLY_CHAIN'), ('SC.AGENTS.APP_SUPPLY_CHAIN'),
+         ('SC.LEGACY.V_PLANNING_OTD_FILL'), ('SC.LEGACY.V_PROCUREMENT_OTD_FILL'), ('SC.LEGACY.V_LOGISTICS_OTD_FILL'),
+         ('SC.OPS.TEST_RESULTS'), ('SC.OPS.TEST_PERSONA_RESULTS'), ('SC.OPS.ALERT_AGENT_ACTIONS'), ('SC.OPS.DQ_CONTRACT_TERMS_RECON'),
+         ('SC.INFORMATION_SCHEMA.TAG_REFERENCES')),
+dml AS (SELECT COUNT(*) AS N FROM SC.OPS._APP_SRC
+        WHERE REGEXP_LIKE(TXT, '.*\\b(INSERT\\s+INTO|DELETE\\s+FROM|MERGE\\s+INTO|UPDATE\\s+SC\\.|TRUNCATE\\s|CREATE\\s|DROP\\s|ALTER\\s|GRANT\\s|REVOKE\\s|CALL\\s).*'))
+SELECT 'I_APP_SOURCE_REFS_ALLOW_LIST',
+       IFF(COUNT(r.REF) > 0 AND COUNT_IF(ok.REF IS NULL) = 0 AND COUNT_IF(r.REF = 'SC.SEMANTIC.SV_SUPPLY_CHAIN') > 0
+           AND COUNT_IF(r.REF = 'SC.AGENTS.AGT_SUPPLY_CHAIN') > 0 AND MAX(dml.N) = 0, 'PASS', 'FAIL'),
+       COUNT(DISTINCT r.REF) || ' distinct SC objects named (' || LISTAGG(DISTINCT r.REF, ', ') WITHIN GROUP (ORDER BY r.REF) || '); outside the allow-list: '
+       || COALESCE(NULLIF(LISTAGG(DISTINCT IFF(ok.REF IS NULL, r.REF, NULL), ', '), ''), 'none') || '; DDL / DML / CALL lines: ' || MAX(dml.N)
+FROM refs r LEFT JOIN ok ON ok.REF = r.REF CROSS JOIN dml;
+
+-- I_APP_DEPLOYED: container runtime (required for restricted caller's rights), SC_WH, live version from the source
+-- stage, owned by SC_ADMIN, USAGE for the three personas, and the source uses the caller's-rights connection
+SHOW STREAMLITS LIKE 'APP_SUPPLY_CHAIN' IN SCHEMA SC.AGENTS;
+SET APP_SHOW = (SELECT COALESCE(MAX("owner") || '|' || MAX("query_warehouse"), 'MISSING|') FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())));
+EXECUTE IMMEDIATE $$
+DECLARE out VARCHAR;
+BEGIN
+  DESCRIBE STREAMLIT SC.AGENTS.APP_SUPPLY_CHAIN;
+  SELECT "runtime_name" || '|' || "main_file" || '|' || COALESCE("live_version_location_uri", 'none') || '|' || COALESCE("last_version_source_location_uri", 'none')
+    INTO :out FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+  RETURN out;
+EXCEPTION WHEN OTHER THEN RETURN 'ERROR|' || LEFT(SQLERRM, 200);
+END;
+$$;
+SET APP_DESC = (SELECT LEFT($1, 250) FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())));
+EXECUTE IMMEDIATE $$
+DECLARE out VARCHAR;
+BEGIN
+  SHOW GRANTS ON STREAMLIT SC.AGENTS.APP_SUPPLY_CHAIN;
+  SELECT LISTAGG(IFF("privilege" = 'USAGE', "grantee_name", NULL), ',') WITHIN GROUP (ORDER BY "grantee_name") INTO :out FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+  RETURN COALESCE(out, 'none');
+EXCEPTION WHEN OTHER THEN RETURN 'ERROR ' || LEFT(SQLERRM, 200);
+END;
+$$;
+SET APP_USAGE = (SELECT LEFT($1, 250) FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())));
+INSERT INTO SC.OPS._RESULTS
+SELECT 'I_APP_DEPLOYED',
+       IFF(SPLIT_PART($APP_SHOW, '|', 1) = 'SC_ADMIN' AND SPLIT_PART($APP_SHOW, '|', 2) = 'SC_WH'
+           AND SPLIT_PART($APP_DESC, '|', 1) ILIKE 'SYSTEM$ST_CONTAINER_RUNTIME%' AND SPLIT_PART($APP_DESC, '|', 2) = 'streamlit_app.py'
+           AND SPLIT_PART($APP_DESC, '|', 3) ILIKE 'snow://streamlit/SC.AGENTS.APP_SUPPLY_CHAIN/versions/live%'
+           AND SPLIT_PART($APP_DESC, '|', 4) ILIKE '@SC.AGENTS.APP_STAGE/app%'
+           AND $APP_USAGE = 'SC_LOGISTICS,SC_PLANNER,SC_PROCUREMENT'
+           AND (SELECT COUNT(*) FROM SC.OPS._APP_SRC WHERE TXT ILIKE '%st.connection("snowflake-callers-rights")%') > 0, 'PASS', 'FAIL'),
+       'owner|warehouse ' || $APP_SHOW || '; runtime|main file|live version|source ' || $APP_DESC || '; USAGE: ' || $APP_USAGE
+       || '; caller''s-rights connection in source: ' || IFF((SELECT COUNT(*) FROM SC.OPS._APP_SRC WHERE TXT ILIKE '%st.connection("snowflake-callers-rights")%') > 0, 'yes', 'NO');
+
+-- I_APP_CALLER_GRANTS_ALLOW_LIST: the caller grants of the app owner SC_ADMIN (restricted caller's rights) cover
+-- exactly the persona surface + SC_WH + the shared SNOWFLAKE database (Cortex functions), never RAW_*, CONFORMED,
+-- LEGACY, OPS or GOVERNANCE. Read as ACCOUNTADMIN (SHOW CALLER GRANTS lists only objects the caller can see).
+USE ROLE ACCOUNTADMIN;
+SHOW CALLER GRANTS TO ROLE SC_ADMIN;
+CREATE OR REPLACE TEMPORARY TABLE SC.OPS._APP_CALLER_GRANTS AS
+SELECT "privilege" AS PRIVILEGE, "granted_on" AS GRANTED_ON, REPLACE("name", '"', '') AS NAME FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+USE ROLE SC_ADMIN;
+INSERT INTO SC.OPS._RESULTS
+WITH exp AS (SELECT COLUMN1 AS PRIVILEGE, COLUMN2 AS GRANTED_ON, COLUMN3 AS NAME FROM VALUES
+               ('USAGE', 'WAREHOUSE', 'SC_WH'), ('USAGE', 'DATABASE', 'SC'), ('USAGE', 'SCHEMA', 'SC.SEMANTIC'), ('USAGE', 'SCHEMA', 'SC.AGENTS'),
+               ('SELECT', 'SEMANTIC_VIEW', 'SC.SEMANTIC.SV_SUPPLY_CHAIN'), ('USAGE', 'CORTEX_AGENT', 'SC.AGENTS.AGT_SUPPLY_CHAIN'),
+               ('USAGE', 'CORTEX_SEARCH_SERVICE', 'SC.AGENTS.CSS_CONTRACTS'),
+               ('USAGE', 'PROCEDURE', 'SC.AGENTS.EXPEDITE_PO(VARCHAR, VARCHAR, VARCHAR)'),
+               ('USAGE', 'PROCEDURE', 'SC.AGENTS.FLAG_SUPPLIER(VARCHAR, VARCHAR, VARCHAR)'),
+               ('USAGE', 'DATABASE', 'SNOWFLAKE'), ('PROGRAM USAGE', 'DATABASE', 'SNOWFLAKE')),
+j AS (SELECT e.NAME AS E_NAME, g.NAME AS G_NAME, COALESCE(g.PRIVILEGE, e.PRIVILEGE) AS PRIVILEGE
+      FROM exp e FULL OUTER JOIN SC.OPS._APP_CALLER_GRANTS g ON g.PRIVILEGE = e.PRIVILEGE AND g.GRANTED_ON = e.GRANTED_ON AND g.NAME = e.NAME)
+SELECT 'I_APP_CALLER_GRANTS_ALLOW_LIST',
+       IFF(COUNT_IF(E_NAME IS NULL) = 0 AND COUNT_IF(G_NAME IS NULL) = 0
+           AND (SELECT COUNT(*) FROM SC.OPS._APP_CALLER_GRANTS WHERE REGEXP_LIKE(NAME, '^SC\\.(RAW_[A-Z]+|CONFORMED|LEGACY|OPS|GOVERNANCE)(\\..*)?$')) = 0, 'PASS', 'FAIL'),
+       COUNT_IF(E_NAME IS NOT NULL AND G_NAME IS NOT NULL) || '/11 expected caller grants to SC_ADMIN; missing: '
+       || COALESCE(NULLIF(LISTAGG(IFF(G_NAME IS NULL, PRIVILEGE || ' ' || E_NAME, NULL), ', '), ''), 'none')
+       || '; unexpected: ' || COALESCE(NULLIF(LISTAGG(IFF(E_NAME IS NULL, PRIVILEGE || ' ' || G_NAME, NULL), ', '), ''), 'none')
+FROM j;
+
+-- I_APP_PERSONA_RESULTS_RECORDED: this run wrote the per-persona rows the app shows (4 roles x 3 SV checks + 3 agent rows)
+INSERT INTO SC.OPS._RESULTS
+SELECT 'I_APP_PERSONA_RESULTS_RECORDED',
+       IFF(COUNT_IF(SURFACE = 'SEMANTIC_VIEW') = 12 AND COUNT_IF(SURFACE = 'AGENT') = 3
+           AND COUNT_IF(CHECK_NAME <> 'HIDDEN_PLANT_US01_ROWS' AND SURFACE = 'SEMANTIC_VIEW' AND IS_EQUAL_TO_ADMIN) = 8, 'PASS', 'FAIL'),
+       COUNT(*) || ' rows in SC.OPS.TEST_PERSONA_RESULTS for this run; ' || LISTAGG(SURFACE || ' ' || ROLE_NAME || ' ' || CHECK_NAME || ' = ' || DISPLAY_VALUE
+       || IFF(IS_EQUAL_TO_ADMIN IS NULL, '', IFF(IS_EQUAL_TO_ADMIN, ' (= admin)', ' (DIFFERS)')), '; ') WITHIN GROUP (ORDER BY SURFACE DESC, CHECK_NAME, ROLE_NAME)
+FROM SC.OPS.TEST_PERSONA_RESULTS WHERE RUN_ID = $RUN_ID;
 
 -- -----------------------------------------------------------------------------
 -- Persist + report

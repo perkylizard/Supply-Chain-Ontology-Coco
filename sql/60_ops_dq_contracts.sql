@@ -10,8 +10,9 @@
 --   INCOTERM                                -> PURCHASE_ORDERS.INCOTERM (per PO line)
 --   LEAD_TIME_DAYS                          -> SUPPLIER_PARTS.LEAD_TIME_DAYS (per part quote)
 --   DELIVERY_TARGET, LATE_PENALTY, VALIDITY -> no supplier-system field (PDF_ONLY)
--- OPS is a side path (architecture.md §1): read by SC_ADMIN, never by personas,
--- agents or apps. Depends on: sql/20_conformed.sql (DIM_CONTRACT). Idempotent.
+-- OPS is a side path (architecture.md §1): read by SC_ADMIN, never by personas or
+-- agents; the app reads its summary with owner's rights only under the AGENTS.md app
+-- exception of 2026-10-04 (page "Trust"). Depends on: sql/20_conformed.sql (DIM_CONTRACT). Idempotent.
 -- =============================================================================
 
 USE ROLE SC_ADMIN;

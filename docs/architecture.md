@@ -145,7 +145,7 @@ If a new metric needs another precomputed input in CONFORMED, add it to `metric_
 | Surface | Connects to | How | Rule |
 |---|---|---|---|
 | **Snowflake Intelligence** | `AGT_SUPPLY_CHAIN` | Agent published to Snowflake Intelligence | Personas use their own role; the agent queries as the caller |
-| **Streamlit** (Streamlit in Snowflake) | `AGT_SUPPLY_CHAIN` for chat; `SV_SUPPLY_CHAIN` for KPI tiles | Cortex Agents REST API from the app; `SELECT … FROM SEMANTIC_VIEW(SC.SEMANTIC.SV_SUPPLY_CHAIN METRICS …)` for tiles | No SQL against `FACT_*` / `DIM_*` and no metric arithmetic in Python |
+| **Streamlit** (Streamlit in Snowflake) | `AGT_SUPPLY_CHAIN` for chat; `SV_SUPPLY_CHAIN` for KPI tiles | `SC.AGENTS.APP_SUPPLY_CHAIN` (`sql/45_app.sql`, container runtime). Agent runs via `SNOWFLAKE.CORTEX.DATA_AGENT_RUN` (the Agents Run API); `SELECT … FROM SEMANTIC_VIEW(SC.SEMANTIC.SV_SUPPLY_CHAIN METRICS …)` for tiles; both on the **restricted caller's rights** connection, so the viewer's row access and masking apply | No SQL against `FACT_*` / `DIM_*` and no metric arithmetic in Python. Owner's-rights reads of `LEGACY` ("The Problem") and `OPS` ("Trust") only under the AGENTS.md app exception of 2026-10-04 |
 | **Slack** | `AGT_SUPPLY_CHAIN` | A Slack app (outside Snowflake) calls the Cortex Agents REST API with a service user mapped to a persona role | Bot answers include the metric name and contract version so users can see which definition answered |
 
 The agent (`sql/40_agents_supply_chain.sql`, Claude orchestration, published to Snowflake Intelligence) has four tools:
